@@ -37,3 +37,25 @@ export const SECTIONS = [
   'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'UNICA'
 ];
 
+/**
+ * Mapping of DNI to Institution information.
+ * This is used for automatic identification of IE and id_ie during login.
+ */
+export const DNI_IE_MAP: Record<string, { ie: string, id_ie: string, nombre: string }> = {
+  '12345678': { 
+    nombre: 'ALVARADO RUIZ, Maria Jose', 
+    ie: '20532 STMA. VIRGEN DEL CARMEN', 
+    id_ie: '1234567' 
+  },
+  '87654321': { 
+    nombre: 'CASTILLO VEGA, Luis Angel', 
+    ie: '21571 RICARDO PALMA', 
+    id_ie: '7654321' 
+  },
+  '11223344': { 
+    nombre: 'DIAZ MORALES, Fatima', 
+    ie: 'GUILLERMO E. BILLINGHURST', 
+    id_ie: '1122334' 
+  }
+};
+

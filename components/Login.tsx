@@ -7,6 +7,7 @@ import { cn } from '../lib/utils';
 import { animate, createTimeline, stagger } from 'animejs';
 
 import { useData } from '../lib/DataContext';
+import { DNI_IE_MAP } from '../lib/constants';
 
 export default function Login() {
   const { login, teachers } = useData();
@@ -24,7 +25,7 @@ export default function Login() {
       // 1. Check for Admin
       if (role === 'admin') {
         if (dni === 'ADMIN123') {
-          const adminUser = { user: 'Administrador', role: 'admin', ie: 'UGEL 16' };
+          const adminUser = { user: 'Administrador', role: 'admin', ie: 'UGEL 16', id_ie: 'ADMIN' };
           login(adminUser);
           return;
         } else {
@@ -34,15 +35,18 @@ export default function Login() {
         }
       }
 
-      // 2. Check for Teacher in the context list
-      const teacher = teachers.find(t => t.dni === dni);
+      // 2. Identification Logic
+      const mappedTeacher = DNI_IE_MAP[dni];
+      const dynamicTeacher = teachers.find(t => t.dni === dni);
+      const teacher = mappedTeacher || dynamicTeacher;
 
       if (teacher) {
         const teacherUser = { 
-          user: teacher.nombre, 
-          dni: teacher.dni,
+          user: teacher.nombre || teacher.user || 'Docente', 
+          dni: dni,
           role: 'teacher', 
           ie: teacher.ie,
+          id_ie: teacher.id_ie || '1234567', // Use mapped ID or fallback
           timestamp: new Date().toISOString()
         };
         login(teacherUser);

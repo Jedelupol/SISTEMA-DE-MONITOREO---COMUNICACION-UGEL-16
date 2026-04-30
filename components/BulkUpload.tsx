@@ -8,6 +8,7 @@ import * as XLSX from 'xlsx';
 import { MATRICES, PERIODOS } from '../lib/matrices_data';
 import { cn } from '../lib/utils';
 import { useData } from '../lib/DataContext';
+import { evaluateResponse } from '../lib/evaluator';
 
 // Column mappings (0-indexed) - NO HEADERS in the files
 const LECTURA_COLS = {
@@ -27,12 +28,15 @@ const ESCRITURA_COLS = {
 };
 
 function normalizeGrado(raw) {
-  if (!raw) return '';
+  if (raw === undefined || raw === null) return '';
   const s = String(raw).trim().replace(/[°ºª]/g, '');
-  // Extract just the number
-  const num = parseInt(s, 10);
-  if (!isNaN(num) && num >= 1 && num <= 6) return String(num);
-  return s;
+  // Match first sequence of digits
+  const match = s.match(/\d+/);
+  if (match) {
+    const num = parseInt(match[0], 10);
+    if (num >= 1 && num <= 6) return String(num);
+  }
+  return ''; // Return empty for invalid grades
 }
 
 function normalizeSection(raw) {
@@ -51,6 +55,12 @@ export default function BulkUpload({ onComplete, session }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [uploadResult, setUploadResult] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [selectedGrado, setSelectedGrado] = useState('1');
+  const [globalYear, setGlobalYear] = useState(new Date().getFullYear().toString());
+  const [globalEvaluationType, setGlobalEvaluationType] = useState('DIAGNÓSTICA');
+  const [globalInstitutionId, setGlobalInstitutionId] = useState('');
+  
+  const [isUploading, setIsUploading] = useState(false);
   const [selectedPeriod, setSelectedPeriod] = useState(PERIODOS.DIAGNOSTICA);
   
   const { records, updateRecords, groups, deleteGroup } = useData();
@@ -76,20 +86,19 @@ export default function BulkUpload({ onComplete, session }) {
         if (!row || row.length < 5) return;
         const ie = String(row[LECTURA_COLS.IE] || '').trim();
         const dni = String(row[LECTURA_COLS.DNI] || '').trim();
-        const grado = normalizeGrado(row[LECTURA_COLS.GRADO]);
+        const rawGrado = row[LECTURA_COLS.GRADO];
+        const grado = normalizeGrado(rawGrado);
         const seccion = normalizeSection(row[LECTURA_COLS.SECCION]);
         
-        if (!dni || !grado) return;
-
-        // Get reading question IDs from matrix
-        const matrix = MATRICES[grado];
-        if (!matrix) return;
+        // Clean DNI and validate grade
+        if (!dni || !grado || !MATRICES[grado]) return;
         
+        const matrix = MATRICES[grado];
         const readingQs = matrix.questions.filter(q => q.competency.toLowerCase().includes('lee'));
         
         const record = {
           institution: ie,
-          dni,
+          dni: dni.replace(/\s+/g, ''), // Remove all spaces from DNI
           grado,
           section: seccion,
           studentName: `Estudiante ${dni}`,
@@ -128,19 +137,19 @@ export default function BulkUpload({ onComplete, session }) {
         if (!row || row.length < 5) return;
         const ie = String(row[ESCRITURA_COLS.IE] || '').trim();
         const dni = String(row[ESCRITURA_COLS.DNI] || '').trim();
-        const grado = normalizeGrado(row[ESCRITURA_COLS.GRADO]);
+        const rawGrado = row[ESCRITURA_COLS.GRADO];
+        const grado = normalizeGrado(rawGrado);
         const seccion = normalizeSection(row[ESCRITURA_COLS.SECCION]);
         
-        if (!dni || !grado) return;
+        // Clean DNI and validate grade
+        if (!dni || !grado || !MATRICES[grado]) return;
 
         const matrix = MATRICES[grado];
-        if (!matrix) return;
-
         const writingQs = matrix.questions.filter(q => q.competency.toLowerCase().includes('escribe'));
 
         const record = {
           institution: ie,
-          dni,
+          dni: dni.replace(/\s+/g, ''), // Remove all spaces from DNI
           grado,
           section: seccion,
           studentName: `Estudiante ${dni}`,
@@ -222,18 +231,42 @@ export default function BulkUpload({ onComplete, session }) {
       });
     }
 
-    const merged = Array.from(recordMap.values()).map(r => {
-      // Clean up internal fields
-      const { _source, _rowIdx, ...clean } = r;
-      return {
-        ...clean,
-        ugel: 'UGEL 16: Barranca',
-        periodo: selectedPeriod,
-        teacherDni: session?.dni || 'ADMIN',
-        teacherName: session?.user || 'Administrador',
-        timestamp: new Date().toISOString()
-      };
-    });
+    const excelFields = [
+      { key: 'dni', labels: ['DNI', 'DNI_Estudiante', 'DOCUMENTO', 'DNI Estudiante', 'DNI_ESTUDIANTE'] },
+      { key: 'studentName', labels: ['Estudiante', 'Apellidos y Nombres', 'NOMBRE', 'Estudiantes', 'ESTUDIANTE', 'APELLIDOS Y NOMBRES'] },
+      { key: 'institution', labels: ['Institución Educativa', 'IE', 'I.E.', 'INSTITUCION EDUCATIVA', 'COLEGIO'] },
+      { key: 'id_ie', labels: ['Código Modular', 'Modular_IE', 'ID_IE', 'CODIGO MODULAR', 'MODULAR_IE'] },
+      { key: 'ugel', labels: ['UGEL', 'Ugel', 'DRE/UGEL'] },
+      { key: 'grado', labels: ['Grado', 'GRADO', 'Año'] },
+      { key: 'section', labels: ['Sección', 'Seccion', 'SECCION', 'SECCIÓN'] },
+      { key: 'periodo', labels: ['Periodo', 'PERIODO', 'Momento'] },
+      { key: 'periodo_anual', labels: ['Año Escolar', 'Anio', 'AÑO', 'ANIO', 'AÑO ESCOLAR'] },
+      { key: 'tipo_evaluacion', labels: ['Tipo Evaluación', 'Tipo_Evaluacion', 'TIPO_EVALUACION', 'EVALUACION'] },
+    ];
+
+    const merged = Array.from(recordMap.values())
+      .filter(r => r.grado && MATRICES[r.grado]) // STRICT FILTER for valid grades
+      .map(r => {
+        // 1. Evaluate achievement levels
+        const evalResult = evaluateResponse(r.grado, r);
+        
+        // 2. Clean up internal fields and enrich with metadata
+        const { _source, _rowIdx, ...clean } = r;
+        return {
+          ...clean,
+          readingLevel: evalResult?.reading?.level || 'Inicio',
+          writingLevel: evalResult?.writing?.level || 'Inicio',
+          nivel_logro: evalResult?.reading?.level || evalResult?.writing?.level || 'Inicio',
+          ugel: 'UGEL 16: Barranca',
+          periodo: selectedPeriod,
+          periodo_anual: globalYear,
+          tipo_evaluacion: globalEvaluationType,
+          id_ie: globalInstitutionId || r.id_ie || '',
+          teacherDni: session?.dni || 'ADMIN',
+          teacherName: session?.user || 'Administrador',
+          timestamp: new Date().toISOString()
+        };
+      });
 
     setMergedRecords(merged);
     setPreviewOpen(true);
@@ -257,7 +290,8 @@ export default function BulkUpload({ onComplete, session }) {
     let skipped = 0;
 
     mergedRecords.forEach(record => {
-      const key = `${record.dni}|${record.grado}|${record.periodo}`;
+      // Key for duplicate detection in this period/year
+      const key = `${record.dni}|${record.grado}|${record.periodo}|${record.periodo_anual}|${record.tipo_evaluacion}|${record.id_ie}`;
       if (existingMap.has(key)) {
         if (overwriteMode) {
           // Merge/Overwrite: update the existing one with new data
@@ -323,6 +357,48 @@ export default function BulkUpload({ onComplete, session }) {
       </div>
 
       {/* Period Selection */}
+      {/* Active Period Info */}
+      {/* Metadata Inputs */}
+      {!uploadResult && !previewOpen && (
+        <div className="grid md:grid-cols-3 gap-4 mb-6 p-6 glass-panel border-white/10">
+          <div>
+            <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest mb-1 block">Año Escolar</label>
+            <select 
+              value={globalYear} 
+              onChange={(e) => setGlobalYear(e.target.value)}
+              className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-white text-sm focus:border-brand-primary outline-none"
+            >
+              <option value="2026">2026</option>
+              <option value="2027">2027</option>
+              <option value="2028">2028</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest mb-1 block">Tipo de Evaluación</label>
+            <select 
+              value={globalEvaluationType} 
+              onChange={(e) => setGlobalEvaluationType(e.target.value)}
+              className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-white text-sm focus:border-brand-primary outline-none"
+            >
+              <option value="DIAGNÓSTICA">Diagnóstica</option>
+              <option value="INICIO">Inicio</option>
+              <option value="PROCESO">Proceso</option>
+              <option value="SALIDA">Salida</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest mb-1 block">Código Modular IE</label>
+            <input 
+              type="text" 
+              placeholder="Ej: 1234567"
+              value={globalInstitutionId}
+              onChange={(e) => setGlobalInstitutionId(e.target.value.trim())}
+              className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-white text-sm focus:border-brand-primary outline-none"
+            />
+          </div>
+        </div>
+      )}
+
       {/* Active Period Info */}
       {!uploadResult && !previewOpen && (
         <div className="mb-8 p-6 glass-panel border-emerald-500/20 bg-emerald-500/5">

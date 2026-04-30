@@ -1,67 +1,20 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import initialRecords from './data.json';
 import { processRecordsIntoGroups, deleteRecordGroup } from './evaluator';
 
 const DataContext = createContext(null);
 
-function generateSeedData() {
-  const names = [
-    "ALVARADO RUIZ, Maria Jose",
-    "CASTILLO VEGA, Luis Angel",
-    "DIAZ MORALES, Fatima",
-    "ESTRADA QUISPE, Jorge",
-    "FLORES CAMPOS, Sofia",
-    "GARCIA LOPEZ, Ricardo",
-    "HUAMAN SOTO, Andrea",
-    "LEON ROJAS, Carlos",
-    "MENDOZA PAZ, Camila",
-    "ORTIZ VILLA, Sebastian"
-  ];
-  
-  const options = ['A', 'B', 'C', 'D'];
-  const writingOptions = ['ADECUADA', 'PARCIAL', 'INADECUADA'];
-  
-  return names.map((name, idx) => {
-    const responses: any = {
-      studentName: name,
-      grado: '2',
-      section: 'A',
-      ugel: 'UGEL 16: Barranca',
-      institution: '20532 STMA. VIRGEN DEL CARMEN',
-      timestamp: new Date().toISOString()
-    };
-    
-    // Lectura (approx 20 questions for grade 2)
-    for (let i = 1; i <= 20; i++) {
-      responses[`C${i}`] = options[Math.floor(Math.random() * 4)];
-    }
-    
-    // Escritura (7 indicators)
-    responses['C2-CA1-1'] = writingOptions[Math.floor(Math.random() * 2)];
-    responses['C2-CA1-2'] = writingOptions[Math.floor(Math.random() * 2)];
-    responses['C2-CA1-3'] = writingOptions[Math.floor(Math.random() * 2)];
-    responses['C2-CA2-1'] = writingOptions[Math.floor(Math.random() * 3)];
-    responses['C2-CA2-2'] = writingOptions[Math.floor(Math.random() * 3)];
-    responses['C2-CA3-1'] = writingOptions[Math.floor(Math.random() * 3)];
-    responses['C2-CA3-2'] = writingOptions[Math.floor(Math.random() * 3)];
-    
-    return responses;
-  });
-}
-
 export function DataProvider({ children }) {
   // Core Records State
-  const [records, setRecords] = useState([]);
-  const [groups, setGroups] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
-
-  // Session & Auth State
+  const [records, setRecords] = useState(initialRecords);
   const [session, setSession] = useState(null);
   const [teachers, setTeachers] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
 
   // Administrative Settings
-  const [activePeriod, setActivePeriod] = useState('Diagnóstica');
+  const [activePeriod, setActivePeriod] = useState('DIAGNÓSTICA');
   const [activeYear, setActiveYear] = useState('2026');
   const [institutionInfo, setInstitutionInfo] = useState({
     ieName: '',
@@ -72,24 +25,18 @@ export function DataProvider({ children }) {
   // Matrix Overrides (stored as an object keyed by `${grado}_${period}`)
   const [matrixOverrides, setMatrixOverrides] = useState({});
 
+  const groups = useMemo(() => processRecordsIntoGroups(records), [records]);
+
   // Initialize from localStorage
   useEffect(() => {
     // 1. Records
     const savedRecords = localStorage.getItem('eval_records');
-    let initialRecords = [];
     if (savedRecords) {
-      try {
-        initialRecords = JSON.parse(savedRecords);
-      } catch (e) {
-        console.error("Failed to parse eval_records", e);
-        initialRecords = generateSeedData();
-      }
+      setRecords(JSON.parse(savedRecords));
     } else {
-      initialRecords = generateSeedData();
       localStorage.setItem('eval_records', JSON.stringify(initialRecords));
+      setRecords(initialRecords);
     }
-    setRecords(initialRecords);
-    setGroups(processRecordsIntoGroups(initialRecords));
 
     // 2. Session
     const savedSession = localStorage.getItem('edu_session');
@@ -126,7 +73,6 @@ export function DataProvider({ children }) {
   useEffect(() => {
     if (!isLoading) {
       localStorage.setItem('eval_records', JSON.stringify(records));
-      setGroups(processRecordsIntoGroups(records));
     }
   }, [records, isLoading]);
 
@@ -217,11 +163,11 @@ export function DataProvider({ children }) {
   }, [matrixOverrides]);
 
   const value = {
-    records,
-    groups,
+    records: session?.role === 'admin' ? records : records.filter(r => String(r.id_ie) === String(session?.id_ie)),
+    groups: session?.role === 'admin' ? groups : groups.filter(g => String(g.id_ie) === String(session?.id_ie)),
     isLoading,
     session,
-    teachers,
+    teachers: session?.role === 'admin' ? teachers : teachers.filter(t => t.ie === session?.ie),
     activePeriod,
     activeYear,
     institutionInfo,

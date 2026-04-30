@@ -54,10 +54,45 @@ export default function Dashboard({ data = [] }) {
   const [showFullReport, setShowFullReport] = useState(false);
   const [mgmtSearch, setMgmtSearch] = useState('');
 
-  const filteredData = useMemo(() => 
-    records.filter(d => d.grado === selectedGrado && (d.periodo === selectedPeriod || (!d.periodo && selectedPeriod === PERIODOS.DIAGNOSTICA))),
-    [records, selectedGrado, selectedPeriod]
-  );
+  // Jerarquía de Filtros y Agregación
+  const filteredData = useMemo(() => {
+    let data = records;
+    if (selectedIE !== 'TODOS') {
+      data = data.filter(r => r.id_ie === selectedIE || r.ie === selectedIE);
+    }
+    if (selectedGrade !== 'TODOS') {
+      data = data.filter(r => r.grado === selectedGrade);
+    }
+    if (selectedSection !== 'TODOS') {
+      data = data.filter(r => r.seccion === selectedSection);
+    }
+    return data;
+  }, [records, selectedIE, selectedGrade, selectedSection]);
+
+  const aggregatedStats = useMemo(() => {
+    const level = selectedIE === 'TODOS' ? 'UGEL' : 
+                  selectedGrade === 'TODOS' ? 'IE' :
+                  selectedSection === 'TODOS' ? 'GRADO' : 'SECCION';
+    return aggregateResults(filteredData, level);
+  }, [filteredData, selectedIE, selectedGrade, selectedSection]);
+
+  // Handlers para Exportación Inteligente
+  const handleExport = async (type: 'INSTITUCIONAL' | 'GRADO' | 'SECCION') => {
+    if (filteredData.length === 0) {
+      alert("No hay datos para exportar en esta selección.");
+      return;
+    }
+
+    const ieName = selectedIE === 'TODOS' ? 'UGEL_16_BARRANCA' : selectedIE;
+    
+    if (type === 'INSTITUCIONAL') {
+      await generateInstitutionalPDF(ieName, records.filter(r => r.id_ie === selectedIE || r.ie === selectedIE));
+    } else if (type === 'GRADO') {
+      await generateDetailedGradePDF(ieName, selectedGrade, filteredData);
+    } else {
+      await generateSectionPDF(ieName, selectedGrade, selectedSection, filteredData);
+    }
+  };
 
   const stats = useMemo(() => {
     if (filteredData.length === 0) return null;
@@ -92,17 +127,83 @@ export default function Dashboard({ data = [] }) {
         <p className="text-white/40 max-w-sm mb-8">
           Seleccione un grado con registros o ingrese nuevos datos en el módulo de registro.
         </p>
-        <div className="flex gap-4">
-           <select 
-            value={selectedGrado}
-            onChange={(e) => setSelectedGrado(e.target.value)}
-            className="bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-white focus:outline-none"
+    <div className="min-h-screen bg-[#0a0f1d] text-white p-4 md:p-8">
+      {/* Panel de Filtros Jerárquicos */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8 bg-white/5 p-6 rounded-2xl border border-white/10 backdrop-blur-xl">
+        <div className="space-y-2">
+          <label className="text-xs font-semibold text-blue-400 uppercase tracking-wider">Institución (UGEL/IE)</label>
+          <select 
+            className="w-full bg-[#1a2235] border border-white/10 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500"
+            value={selectedIE}
+            onChange={(e) => {
+              setSelectedIE(e.target.value);
+              setSelectedGrade('TODOS');
+              setSelectedSection('TODOS');
+            }}
           >
-            {Object.keys(MATRICES).map(key => (
-              <option key={key} value={key} className="bg-[#1e1b4b] text-slate-300">{MATRICES[key].name}</option>
+            <option value="TODOS">Todas las Instituciones (Nivel UGEL)</option>
+            {institutions.map(ie => (
+              <option key={ie.id} value={ie.id}>{ie.nombre}</option>
             ))}
           </select>
         </div>
+
+        <div className="space-y-2">
+          <label className="text-xs font-semibold text-blue-400 uppercase tracking-wider">Grado</label>
+          <select 
+            className="w-full bg-[#1a2235] border border-white/10 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500"
+            value={selectedGrade}
+            onChange={(e) => {
+              setSelectedGrade(e.target.value);
+              setSelectedSection('TODOS');
+            }}
+          >
+            <option value="TODOS">Todos los Grados</option>
+            {['1ero', '2do', '3ero', '4to', '5to'].map(g => (
+              <option key={g} value={g}>{g}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-xs font-semibold text-blue-400 uppercase tracking-wider">Sección</label>
+          <select 
+            className="w-full bg-[#1a2235] border border-white/10 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500"
+            value={selectedSection}
+            onChange={(e) => setSelectedSection(e.target.value)}
+          >
+            <option value="TODOS">Todas las Secciones</option>
+            {/* Lógica para filtrar secciones existentes según el grado */}
+            {[...new Set(records.filter(r => r.grado === selectedGrade).map(r => r.seccion))].sort().map(s => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Panel de Exportación Inteligente */}
+        <div className="flex flex-col gap-2 justify-end">
+          <button 
+            onClick={() => handleExport('INSTITUCIONAL')}
+            className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 p-2 rounded-lg text-xs font-bold transition-all"
+          >
+            <FileText size={14} /> Reporte Institucional
+          </button>
+          <button 
+            onClick={() => handleExport('GRADO')}
+            className="flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 p-2 rounded-lg text-xs font-bold transition-all"
+            disabled={selectedGrade === 'TODOS'}
+          >
+            <Users size={14} /> Reporte por Grado
+          </button>
+          <button 
+            onClick={() => handleExport('SECCION')}
+            className="flex items-center justify-center gap-2 bg-teal-600 hover:bg-teal-700 p-2 rounded-lg text-xs font-bold transition-all"
+            disabled={selectedSection === 'TODOS'}
+          >
+            <Printer size={14} /> Reporte de Aula
+          </button>
+        </div>
+      </div>
       </div>
     );
   }

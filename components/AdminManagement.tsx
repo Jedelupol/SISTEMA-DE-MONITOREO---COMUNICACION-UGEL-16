@@ -2,10 +2,10 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ShieldCheck, Users, Calendar, Trash2, Upload, FileSpreadsheet, CheckCircle2, AlertCircle, Search, Info } from 'lucide-react';
+import { ShieldCheck, Users, Calendar, Trash2, Upload, FileSpreadsheet, CheckCircle2, AlertCircle, Search, Info, Download } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { PERIODOS } from '../lib/matrices_data';
-import { cn } from '../lib/utils';
+import { cn, generateZipOfReports } from '../lib/utils';
 import { animate, stagger } from 'animejs';
 
 import { useData } from '../lib/DataContext';
@@ -16,6 +16,8 @@ export default function AdminManagement() {
     activePeriod, setActivePeriod, 
     activeYear, setActiveYear,
     institutionInfo, setInstitutionInfo,
+    evaluationRecords,
+    matrixOverrides,
     clearAllData: contextClearAllData,
     isLoading
   } = useData();
@@ -23,6 +25,7 @@ export default function AdminManagement() {
   const [searchTerm, setSearchTerm] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [isZipping, setIsZipping] = useState(false);
   
   const fileInputRef = useRef(null);
 
@@ -52,6 +55,28 @@ export default function AdminManagement() {
   }, []);
 
   const YEARS = ['2026', '2027', '2028'];
+
+  const [zipProgress, setZipProgress] = useState(0);
+
+  const handleDownloadAllReports = async () => {
+    setIsZipping(true);
+    setZipProgress(0);
+    try {
+      await generateZipOfReports(
+        evaluationRecords, 
+        activeYear, 
+        activePeriod, 
+        matrixOverrides,
+        (p) => setZipProgress(p)
+      );
+    } catch (err) {
+      console.error(err);
+      alert("Error al generar los reportes masivos.");
+    } finally {
+      setIsZipping(false);
+      setTimeout(() => setZipProgress(0), 2000);
+    }
+  };
 
   const handleTeacherUpload = (e) => {
     const file = e.target.files?.[0];
@@ -153,13 +178,76 @@ export default function AdminManagement() {
           </h1>
           <p className="text-white/40">Control de padrones, periodos y depuración del sistema</p>
         </div>
-        <button 
-          onClick={handleClearAllData}
-          className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 rounded-xl text-xs font-bold transition-all flex items-center gap-2 group"
-        >
-          <Trash2 size={16} className="group-hover:rotate-12 transition-transform" /> Limpiar Base de Datos
-        </button>
+        <div className="flex gap-3 items-center">
+          <button 
+            onClick={handleDownloadAllReports}
+            disabled={isZipping}
+            className={cn(
+              "px-4 py-2 bg-brand-primary/10 hover:bg-brand-primary/20 text-brand-primary border border-brand-primary/20 rounded-xl text-xs font-bold transition-all flex items-center gap-2 group",
+              isZipping && "opacity-50 cursor-not-allowed"
+            )}
+          >
+            {isZipping ? (
+              <div className="w-4 h-4 border-2 border-brand-primary border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <Download size={16} className="group-hover:translate-y-0.5 transition-transform" />
+            )}
+            {isZipping ? 'Generando ZIP...' : 'Descargar Todos los Informes (.ZIP)'}
+          </button>
+          <button 
+            onClick={handleClearAllData}
+            className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 rounded-xl text-xs font-bold transition-all flex items-center gap-2 group"
+          >
+            <Trash2 size={16} className="group-hover:rotate-12 transition-transform" /> Limpiar Base de Datos
+          </button>
+        </div>
       </div>
+
+      <AnimatePresence>
+        {isZipping && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-md"
+          >
+            <div className="max-w-md w-full p-10 glass-panel border-brand-primary/20 text-center">
+              <div className="w-24 h-24 bg-brand-primary/10 rounded-full flex items-center justify-center mx-auto mb-6 relative">
+                <div className="absolute inset-0 border-4 border-white/5 rounded-full" />
+                <svg className="w-full h-full absolute -rotate-90">
+                  <circle
+                    cx="48" cy="48" r="44"
+                    fill="transparent"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                    strokeDasharray={276}
+                    strokeDashoffset={276 - (276 * zipProgress) / 100}
+                    className="text-brand-primary transition-all duration-300"
+                  />
+                </svg>
+                <Download className="text-brand-primary w-8 h-8 animate-bounce" />
+              </div>
+              <h3 className="text-2xl font-black text-white mb-2">Generando Reportes</h3>
+              <p className="text-white/40 text-sm mb-8">Estamos procesando los informes institucionales para el periodo {activePeriod} - {activeYear}.</p>
+              
+              <div className="space-y-2">
+                <div className="flex justify-between text-[10px] font-black uppercase tracking-widest">
+                  <span className="text-brand-primary">Progreso</span>
+                  <span className="text-white">{zipProgress}%</span>
+                </div>
+                <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
+                  <motion.div 
+                    className="h-full bg-brand-primary" 
+                    animate={{ width: `${zipProgress}%` }}
+                  />
+                </div>
+              </div>
+              
+              <p className="mt-6 text-[10px] text-white/20 font-medium uppercase tracking-tighter">UGEL 16 - BARRANCA | Sistema de Gestión de Métricas</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <div className="grid md:grid-cols-2 gap-8">
         <div className="glass-panel p-6 space-y-8 admin-card opacity-0">

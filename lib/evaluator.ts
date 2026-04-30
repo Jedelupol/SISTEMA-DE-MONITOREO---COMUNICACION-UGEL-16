@@ -208,10 +208,11 @@ export function getAchievementLevels(allRecords, gradoKey = null, competencyType
       summary.total++;
     } else if (level) {
       // Handle cases where level name might vary slightly
-      if (level.toUpperCase() === 'SATISFACTORIO') { summary.Satisfactorio++; summary.total++; }
-      else if (level.toUpperCase() === 'LOGRADO') { summary.Logrado++; summary.total++; }
-      else if (level.toUpperCase() === 'PROCESO') { summary.Proceso++; summary.total++; }
-      else if (level.toUpperCase() === 'INICIO') { summary.Inicio++; summary.total++; }
+      const upperLevel = level.toUpperCase();
+      if (upperLevel === 'SATISFACTORIO') { summary.Satisfactorio++; summary.total++; }
+      else if (upperLevel === 'LOGRADO') { summary.Logrado++; summary.total++; }
+      else if (upperLevel === 'PROCESO') { summary.Proceso++; summary.total++; }
+      else if (upperLevel === 'INICIO') { summary.Inicio++; summary.total++; }
     }
   });
 
@@ -265,10 +266,15 @@ export function getCapacityAverages(allRecords, gradoKey, competencyType = 'read
   const totals = {};
 
   allRecords.forEach(rec => {
-    if (periodoFilter && rec.periodo && rec.periodo !== periodoFilter) return;
+    // 1. Period Filter (already handled in many cases but good for safety)
+    if (periodoFilter && rec.periodo && rec.periodo !== periodoFilter && rec.tipo_evaluacion !== periodoFilter) return;
 
-    const evalResult = evaluateResponse(gradoKey, rec, matrixOverrides);
-    if (evalResult) {
+    // 2. Use specific grade if "ALL" is passed
+    const activeGradoKey = (gradoKey === 'ALL' || !gradoKey) ? rec.grado : gradoKey;
+    if (!activeGradoKey) return;
+
+    const evalResult = evaluateResponse(activeGradoKey, rec, matrixOverrides);
+    if (evalResult && evalResult[competencyType]) {
       const capacities = evalResult[competencyType].capacities;
       Object.keys(capacities).forEach(cap => {
         if (!totals[cap]) totals[cap] = { score: 0, maxScore: 0 };
@@ -281,7 +287,7 @@ export function getCapacityAverages(allRecords, gradoKey, competencyType = 'read
   return Object.keys(totals).map(cap => ({
     name: cap,
     percentage: totals[cap].maxScore > 0 ? ((totals[cap].score / totals[cap].maxScore) * 100).toFixed(1) : "0.0"
-  }));
+  })).sort((a, b) => parseFloat(b.percentage) - parseFloat(a.percentage));
 }
 
 export function getStudentPerformanceList(allRecords, gradoKey, matrixOverrides = {}) {

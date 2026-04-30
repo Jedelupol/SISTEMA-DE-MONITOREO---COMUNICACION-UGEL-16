@@ -1,9 +1,31 @@
 import React, { useState, useMemo } from 'react';
 import { 
-  PieChart, Pie, Cell, ResponsiveContainer, 
-  BarChart, Bar, XAxis, YAxis, Tooltip, 
-  CartesianGrid, Legend, LineChart, Line, AreaChart, Area 
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  PieChart, Pie, Cell
 } from 'recharts';
+import html2canvas from 'html2canvas';
+
+export const exportChartsToImages = async (containerId: string): Promise<Record<string, string>> => {
+  const container = document.getElementById(containerId);
+  if (!container) return {};
+
+  const images: Record<string, string> = {};
+  const chartSections = container.querySelectorAll('.chart-panel-container');
+  
+  for (let i = 0; i < chartSections.length; i++) {
+    const section = chartSections[i] as HTMLElement;
+    const title = section.querySelector('h3')?.textContent || `chart-${i}`;
+    const canvas = await html2canvas(section, {
+      backgroundColor: '#111827',
+      scale: 2,
+      logging: false
+    });
+    images[title] = canvas.toDataURL('image/png');
+  }
+  
+  return images;
+};
+
 import { motion, AnimatePresence } from 'framer-motion';
 import { useData } from '../lib/DataContext';
 import { 
@@ -13,6 +35,10 @@ import {
   getGlobalFilters 
 } from '../lib/evaluator';
 import { 
+  chartToImage, 
+  exportToPDF 
+} from '../lib/utils';
+import { 
   TrendingUp, Users, Award, 
   BarChart2, LineChart as LineChartIcon, 
   Sparkles, Filter, Calendar, Activity,
@@ -20,6 +46,7 @@ import {
   Download, FileText, Share2, Info,
   School, Hash, LayoutGrid, Target
 } from 'lucide-react';
+import CompetencyBreakdown from './CompetencyBreakdown';
 
 const COLORS = {
   Satisfactorio: '#10b981',
@@ -221,6 +248,47 @@ export default function AnalysisDashboard() {
     document.body.removeChild(link);
   };
 
+  const handleExportPDF = async () => {
+    const evolutionImg = await chartToImage('evolution-chart-container');
+    const distributionImg = await chartToImage('distribution-chart-container');
+    
+    await exportToPDF({
+      institution: selectedIE === 'ALL' ? 'CONSOLIDADO UGEL 16' : (filterOptions.ies.find(i => i.id === selectedIE)?.name || 'IE Seleccionada'),
+      grade: selectedGrade,
+      period: selectedPeriod,
+      year: selectedYear,
+      totalStudents: totalStudents,
+      competency: selectedCompetency
+    }, {
+      evolution: evolutionImg,
+      distribution: distributionImg
+    });
+  };
+
+  const handleExportImages = async () => {
+    const evolutionImg = await chartToImage('evolution-chart-container');
+    const distributionImg = await chartToImage('distribution-chart-container');
+    
+    if (evolutionImg) {
+      const link = document.createElement('a');
+      link.href = evolutionImg;
+      link.download = `Grafico_Evolucion_${selectedYear}_${selectedPeriod}.png`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+    
+    if (distributionImg) {
+      const link = document.createElement('a');
+      link.href = distributionImg;
+      link.download = `Grafico_Distribucion_${selectedYear}_${selectedPeriod}.png`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+  };
+
+
   return (
     <div className="space-y-10 pb-20 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
       {/* Header & Main Filters */}
@@ -331,10 +399,22 @@ export default function AnalysisDashboard() {
               LIMPIAR
             </button>
             <button 
+              onClick={handleExportPDF}
+              className="px-6 py-3 rounded-xl bg-indigo-600 border border-indigo-500 text-white flex items-center gap-2 text-xs font-black hover:bg-indigo-700 transition-all shadow-lg"
+            >
+              <FileText size={14} /> DESCARGAR PDF
+            </button>
+            <button 
               onClick={handleExport}
-              className="px-6 py-3 rounded-xl bg-white/5 border border-white/10 text-white flex items-center gap-2 text-xs font-black hover:bg-brand-primary transition-all shadow-lg"
+              className="px-6 py-3 rounded-xl bg-white/5 border border-white/10 text-white flex items-center gap-2 text-xs font-black hover:bg-white/10 transition-all shadow-lg"
             >
               <Download size={14} /> EXPORTAR CSV
+            </button>
+            <button 
+              onClick={handleExportImages}
+              className="px-6 py-3 rounded-xl bg-emerald-600/20 border border-emerald-500/30 text-emerald-400 flex items-center gap-2 text-xs font-black hover:bg-emerald-600/30 transition-all shadow-lg"
+            >
+              <Share2 size={14} /> EXPORTAR PNG
             </button>
           </div>
         </div>
@@ -389,7 +469,7 @@ export default function AnalysisDashboard() {
               <Info className="text-white/20 hover:text-white/40 cursor-help" size={20} />
            </div>
            
-           <div className="h-[350px] w-full relative z-10">
+           <div id="evolution-chart-container" className="h-[350px] w-full relative z-10">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={evolutionData}>
                   <defs>
@@ -444,7 +524,7 @@ export default function AnalysisDashboard() {
               <p className="text-white/40 text-sm mt-2">Composición porcentual de los niveles de aprendizaje.</p>
            </div>
 
-           <div className="h-[300px] w-full my-8">
+           <div id="distribution-chart-container" className="h-[300px] w-full my-8">
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
@@ -485,6 +565,27 @@ export default function AnalysisDashboard() {
                 </div>
               ))}
            </div>
+        </div>
+
+        {/* Capacity Breakdown */}
+        <div className="lg:col-span-12 glass-panel p-10 border-white/5 overflow-hidden">
+          <div className="mb-8 flex justify-between items-center">
+            <div>
+              <h3 className="text-2xl font-black text-white tracking-tight flex items-center gap-3">
+                <Target size={24} className="text-brand-primary" /> Análisis por Capacidades
+              </h3>
+              <p className="text-white/40 text-sm mt-2">Desempeño promedio en cada habilidad específica de la competencia.</p>
+            </div>
+          </div>
+          
+          <div className="h-[400px]">
+            <CompetencyBreakdown 
+              records={filteredRecords} 
+              grado={selectedGrade} 
+              competencyType={selectedCompetency} 
+              periodo={selectedPeriod} 
+            />
+          </div>
         </div>
 
         {/* Competency Table */}

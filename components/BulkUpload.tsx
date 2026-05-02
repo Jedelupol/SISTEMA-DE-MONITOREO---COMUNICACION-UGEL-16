@@ -1,9 +1,8 @@
 "use client";
 
-import * as React from 'react';
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, FileSpreadsheet, CheckCircle2, AlertCircle, Trash2, Eye, Download, X } from 'lucide-react';
+import { Upload, FileSpreadsheet, CheckCircle2, AlertCircle, Trash2, Eye, Download, X, School, ChevronDown, Database } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { MATRICES, PERIODOS } from '../lib/matrices_data';
 import { cn } from '../lib/utils';
@@ -46,34 +45,44 @@ function normalizeSection(raw) {
   return s;
 }
 
-export default function BulkUpload({ onComplete, session }) {
-  const [lecturaData, setLecturaData] = useState(null);
-  const [escrituraData, setEscrituraData] = useState(null);
+export default function BulkUpload({ onComplete, session }: any) {
+  const { 
+    records: allRecords, 
+    updateRecords, 
+    groups, 
+    deleteGroup, 
+    activePeriod, 
+    activeYear, 
+    setActivePeriod, 
+    setActiveYear, 
+    clearAllData 
+  } = useData();
+
+  const [lecturaData, setLecturaData] = useState<any[] | null>(null);
+  const [escrituraData, setEscrituraData] = useState<any[] | null>(null);
   const [lecturaFile, setLecturaFile] = useState('');
   const [escrituraFile, setEscrituraFile] = useState('');
-  const [mergedRecords, setMergedRecords] = useState([]);
+  const [mergedRecords, setMergedRecords] = useState<any[]>([]);
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [uploadResult, setUploadResult] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [selectedGrado, setSelectedGrado] = useState('1');
-  const [globalYear, setGlobalYear] = useState(new Date().getFullYear().toString());
+  const [globalYear, setGlobalYear] = useState(activeYear || '2026');
   const [globalEvaluationType, setGlobalEvaluationType] = useState('DIAGNÓSTICA');
   const [globalInstitutionId, setGlobalInstitutionId] = useState('');
-  
+  const [sanityWarnings, setSanityWarnings] = useState<string[]>([]);
+  const [uploadResult, setUploadResult] = useState<any>(null);
   const [isUploading, setIsUploading] = useState(false);
-  const [selectedPeriod, setSelectedPeriod] = useState(PERIODOS.DIAGNOSTICA);
-  
-  const { records, updateRecords, groups, deleteGroup } = useData();
+  const [selectedPeriod, setSelectedPeriod] = useState(activePeriod || PERIODOS.DIAGNOSTICA);
   
   useEffect(() => {
     const savedPeriod = localStorage.getItem('active_period') || PERIODOS.DIAGNOSTICA;
     setSelectedPeriod(savedPeriod);
   }, []);
   
-  const lecturaRef = useRef(null);
-  const escrituraRef = useRef(null);
+  const lecturaRef = useRef<HTMLInputElement>(null);
+  const escrituraRef = useRef<HTMLInputElement>(null);
 
-  const parseLectura = useCallback((file) => {
+  const parseLectura = useCallback((file: File) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       const data = new Uint8Array(e.target!.result as ArrayBuffer);
@@ -81,24 +90,39 @@ export default function BulkUpload({ onComplete, session }) {
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       const rows: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
       
-      const records = [];
+      const localRecords: any[] = [];
+      const errors: string[] = [];
       rows.forEach((row, idx) => {
         if (!row || row.length < 5) return;
         const ie = String(row[LECTURA_COLS.IE] || '').trim();
-        const dni = String(row[LECTURA_COLS.DNI] || '').trim();
+        const dni = String(row[LECTURA_COLS.DNI] || '').trim().replace(/\s+/g, '');
         const rawGrado = row[LECTURA_COLS.GRADO];
         const grado = normalizeGrado(rawGrado);
         const seccion = normalizeSection(row[LECTURA_COLS.SECCION]);
         
-        // Clean DNI and validate grade
-        if (!dni || !grado || !MATRICES[grado]) return;
+        // SANITY CHECK
+        if (!dni) {
+          errors.push(`Fila ${idx + 1}: DNI vacío.`);
+          return;
+        }
+        if (dni.length < 5) {
+          errors.push(`Fila ${idx + 1}: DNI "${dni}" demasiado corto.`);
+        }
+        if (!grado) {
+          errors.push(`Fila ${idx + 1}: Grado inválido o vacío ("${rawGrado}").`);
+          return;
+        }
+        if (!MATRICES[grado]) {
+          errors.push(`Fila ${idx + 1}: No existe matriz para el grado ${grado}.`);
+          return;
+        }
         
         const matrix = MATRICES[grado];
         const readingQs = matrix.questions.filter(q => q.competency.toLowerCase().includes('lee'));
         
-        const record = {
+        const record: any = {
           institution: ie,
-          dni: dni.replace(/\s+/g, ''), // Remove all spaces from DNI
+          dni: dni,
           grado,
           section: seccion,
           studentName: `Estudiante ${dni}`,
@@ -107,24 +131,32 @@ export default function BulkUpload({ onComplete, session }) {
         };
 
         // Map columns starting from FIRST_Q
+        let answeredCount = 0;
         for (let i = 0; i < 20; i++) {
           const colIdx = LECTURA_COLS.FIRST_Q + i;
           const val = row[colIdx] !== undefined ? String(row[colIdx]).trim().toUpperCase() : '';
           if (i < readingQs.length) {
-            record[readingQs[i].id] = val === 'SIN RESPUESTA' ? '' : val;
+            const finalVal = val === 'SIN RESPUESTA' ? '' : val;
+            record[readingQs[i].id] = finalVal;
+            if (finalVal) answeredCount++;
           }
         }
 
-        records.push(record);
+        if (answeredCount === 0) {
+          errors.push(`Fila ${idx + 1}: Estudiante ${dni} no tiene respuestas de lectura.`);
+        }
+
+        localRecords.push(record);
       });
 
-      setLecturaData(records);
+      setSanityWarnings(prev => [...prev, ...errors]);
+      setLecturaData(localRecords);
       setLecturaFile(file.name);
     };
     reader.readAsArrayBuffer(file);
   }, []);
 
-  const parseEscritura = useCallback((file) => {
+  const parseEscritura = useCallback((file: File) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       const data = new Uint8Array(e.target!.result as ArrayBuffer);
@@ -132,24 +164,39 @@ export default function BulkUpload({ onComplete, session }) {
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       const rows: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
       
-      const records = [];
+      const localRecords: any[] = [];
+      const errors: string[] = [];
       rows.forEach((row, idx) => {
         if (!row || row.length < 5) return;
         const ie = String(row[ESCRITURA_COLS.IE] || '').trim();
-        const dni = String(row[ESCRITURA_COLS.DNI] || '').trim();
+        const dni = String(row[ESCRITURA_COLS.DNI] || '').trim().replace(/\s+/g, '');
         const rawGrado = row[ESCRITURA_COLS.GRADO];
         const grado = normalizeGrado(rawGrado);
         const seccion = normalizeSection(row[ESCRITURA_COLS.SECCION]);
         
-        // Clean DNI and validate grade
-        if (!dni || !grado || !MATRICES[grado]) return;
+        // SANITY CHECK
+        if (!dni) {
+          errors.push(`Fila ${idx + 1}: DNI vacío (Escritura).`);
+          return;
+        }
+        if (!grado) {
+          errors.push(`Fila ${idx + 1}: Grado inválido en Escritura ("${rawGrado}").`);
+          return;
+        }
+        if (!MATRICES[grado]) {
+          errors.push(`Fila ${idx + 1}: No existe matriz para el grado ${grado}.`);
+          return;
+        }
 
         const matrix = MATRICES[grado];
-        const writingQs = matrix.questions.filter(q => q.competency.toLowerCase().includes('escribe'));
+        const writingQs = matrix.questions.filter(q => {
+          const cat = normalizeCompetency(q.competency);
+          return cat === 'writing';
+        });
 
-        const record = {
+        const record: any = {
           institution: ie,
-          dni: dni.replace(/\s+/g, ''), // Remove all spaces from DNI
+          dni,
           grado,
           section: seccion,
           studentName: `Estudiante ${dni}`,
@@ -158,6 +205,7 @@ export default function BulkUpload({ onComplete, session }) {
         };
 
         // Map C1, C2, C3... from FIRST_Q column onwards
+        let answeredCount = 0;
         for (let i = 0; i < 10; i++) {
           const colIdx = ESCRITURA_COLS.FIRST_Q + i;
           const val = row[colIdx] !== undefined ? String(row[colIdx]).trim().toUpperCase() : '';
@@ -170,17 +218,23 @@ export default function BulkUpload({ onComplete, session }) {
               normalized = 'PARCIALMENTE ADECUADA';
             } else if (val.includes('INADECUADA')) {
               normalized = 'INADECUADA';
-            } else if (val.includes('NO RESPOND') || val.includes('NO RESPOND')) {
+            } else if (val.includes('NO RESPOND')) {
               normalized = 'NO RESPONDIDA';
             }
             record[writingQs[i].id] = normalized;
+            answeredCount++;
           }
         }
 
-        records.push(record);
+        if (answeredCount === 0) {
+          errors.push(`Fila ${idx + 1}: Estudiante ${dni} no tiene respuestas de escritura.`);
+        }
+
+        localRecords.push(record);
       });
 
-      setEscrituraData(records);
+      setSanityWarnings(prev => [...prev, ...errors]);
+      setEscrituraData(localRecords);
       setEscrituraFile(file.name);
     };
     reader.readAsArrayBuffer(file);
@@ -331,6 +385,7 @@ export default function BulkUpload({ onComplete, session }) {
     setMergedRecords([]);
     setPreviewOpen(false);
     setUploadResult(null);
+    setSanityWarnings([]);
   };
 
   // Summary of records by grado
@@ -487,6 +542,21 @@ export default function BulkUpload({ onComplete, session }) {
             />
           </div>
 
+          {/* Sanity Warnings */}
+          {sanityWarnings.length > 0 && (
+            <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 max-h-32 overflow-auto">
+              <p className="text-xs font-bold text-amber-400 flex items-center gap-2 mb-2">
+                <AlertCircle size={14} /> Advertencias de Consistencia ({sanityWarnings.length})
+              </p>
+              <ul className="space-y-1">
+                {sanityWarnings.slice(0, 20).map((err, i) => (
+                  <li key={i} className="text-[10px] text-amber-200/60">• {err}</li>
+                ))}
+                {sanityWarnings.length > 20 && <li className="text-[10px] text-amber-200/40">...y {sanityWarnings.length - 20} más</li>}
+              </ul>
+            </div>
+          )}
+
           {/* Format info */}
           <div className="p-4 rounded-xl bg-blue-500/10 border border-blue-500/20">
             <p className="text-xs text-blue-300 flex items-start gap-2">
@@ -634,60 +704,258 @@ export default function BulkUpload({ onComplete, session }) {
           key="data-mgmt" 
           onUpdate={() => onComplete()} 
           groups={groups}
+          allRecords={allRecords}
+          updateRecords={updateRecords}
           deleteGroup={deleteGroup}
+          clearAllData={clearAllData}
         />
       )}
     </div>
   );
 }
 
-function DataManagementSection({ onUpdate, groups, deleteGroup }) {
-  const handleDeleteGroup = (group) => {
-    if (!confirm(`¿Está seguro de eliminar ${group.count} registros de ${group.ie} - ${group.grado}° ${group.section} (${group.periodo})?`)) return;
-    deleteGroup(group);
-    if (onUpdate) onUpdate();
+// Optimización: Memoizamos la sección completa para evitar re-renders innecesarios con 3000+ registros
+const DataManagementSection = ({ groups, allRecords, updateRecords, deleteGroup, clearAllData }: any) => {
+  const [expandedIEs, setExpandedIEs] = useState<string[]>([]);
+  const [expandedGrades, setExpandedGrades] = useState<string[]>([]);
+  const [purgeConfirmLevel, setPurgeConfirmLevel] = useState(0);
+
+  // Memoize hierarchy calculation
+  const hierarchy = useMemo(() => {
+    const tree = {};
+    groups.forEach(g => {
+      const ie = g.ie || 'Sin IE';
+      const grade = g.grado;
+      
+      if (!tree[ie]) tree[ie] = { grades: {}, total: 0, id_ie: g.id_ie };
+      if (!tree[ie].grades[grade]) tree[ie].grades[grade] = { sections: [], count: 0 };
+      
+      tree[ie].grades[grade].sections.push(g);
+      tree[ie].grades[grade].count += g.count;
+      tree[ie].total += g.count;
+    });
+    return tree;
+  }, [groups]);
+
+  const toggleIE = (ie: string) => {
+    setExpandedIEs(prev => prev.includes(ie) ? prev.filter(i => i !== ie) : [...prev, ie]);
   };
 
-  if (groups.length === 0) return null;
+  const toggleGrade = (ie: string, grade: string) => {
+    const key = `${ie}-${grade}`;
+    setExpandedGrades(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key]);
+  };
+
+  const handleDeleteIE = (ieName, totalCount) => {
+    if (confirm(`¿Está seguro de eliminar TODOS los registros de la institución "${ieName}"? (${totalCount} estudiantes)`)) {
+      const filtered = allRecords.filter(r => (r.institution || 'Sin IE') !== ieName);
+      updateRecords(filtered);
+    }
+  };
+
+  const handleDeleteGrade = (ieName, grade, gradeCount) => {
+    if (confirm(`¿Eliminar todos los registros de ${grade}° Grado en "${ieName}"? (${gradeCount} estudiantes)`)) {
+      const filtered = allRecords.filter(r => 
+        !((r.institution || 'Sin IE') === ieName && String(r.grado) === String(grade))
+      );
+      updateRecords(filtered);
+    }
+  };
+
+  const handleDeleteSection = (group) => {
+    if (confirm(`¿Eliminar la sección "${group.section}" del ${group.grado}° grado?`)) {
+      deleteGroup(group);
+    }
+  };
+
+  const handlePurgeAll = () => {
+    if (purgeConfirmLevel === 0) {
+      setPurgeConfirmLevel(1);
+    } else if (purgeConfirmLevel === 1) {
+      setPurgeConfirmLevel(2);
+    } else {
+      clearAllData('EVAL');
+      setPurgeConfirmLevel(0);
+      alert('Base de datos de evaluaciones purgada completamente.');
+    }
+  };
+
+  if (groups.length === 0) {
+    return (
+      <div className="text-center py-20 glass-panel border-dashed border-white/10">
+        <Database size={48} className="mx-auto text-white/10 mb-4" />
+        <p className="text-white/40 text-sm">No hay datos cargados en el sistema</p>
+      </div>
+    );
+  }
+
+  const ies = Object.keys(hierarchy).sort();
 
   return (
-    <div className="mt-12 space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-bold text-white/40 uppercase tracking-widest flex items-center gap-2">
-          <Trash2 size={14} /> Gestión de Datos Existentes
-        </h2>
+    <div className="space-y-6">
+      {/* Botón Maestro de Limpieza */}
+      <div className="flex justify-end mb-4">
+        <button
+          onClick={handlePurgeAll}
+          className={cn(
+            "px-6 py-3 rounded-2xl text-xs font-black transition-all flex items-center gap-3 shadow-xl",
+            purgeConfirmLevel === 0 ? "bg-white/5 text-red-400 border border-red-500/20 hover:bg-red-500/10" :
+            purgeConfirmLevel === 1 ? "bg-orange-500 text-white animate-pulse" :
+            "bg-red-600 text-white scale-105 shadow-red-500/40"
+          )}
+        >
+          <Trash2 size={16} />
+          {purgeConfirmLevel === 0 ? "LIMPIAR TODA LA BASE DE DATOS" :
+           purgeConfirmLevel === 1 ? "¿ESTÁ SEGURO DE ELIMINAR TODO?" :
+           "¡CONFIRMAR ELIMINACIÓN TOTAL!"}
+        </button>
       </div>
 
-      <div className="grid gap-3">
-        {groups.map((group, idx) => (
-          <div key={idx} className="glass-panel p-4 flex items-center justify-between group hover:border-red-500/30 transition-all">
-            <div className="flex items-center gap-4">
-              <div className="w-10 h-10 bg-white/5 rounded-xl flex items-center justify-center text-white/40">
-                <span className="text-sm font-bold">{group.grado}°</span>
-              </div>
-              <div>
-                <p className="text-sm font-bold text-white">{group.ie}</p>
-                <div className="flex gap-2 mt-0.5">
-                  <span className="text-[10px] text-brand-primary font-bold uppercase">{group.section}</span>
-                  <span className="text-[10px] text-white/20">•</span>
-                  <span className="text-[10px] text-emerald-400 font-bold uppercase">{group.periodo}</span>
-                  <span className="text-[10px] text-white/20">•</span>
-                  <span className="text-[10px] text-white/40">{group.count} estudiantes</span>
+      <div className="space-y-3">
+        <div className="flex items-center gap-2 px-2 mb-2">
+          <Database size={14} className="text-brand-primary" />
+          <h3 className="text-[10px] font-black text-white/40 uppercase tracking-[0.2em]">Instituciones Registradas</h3>
+        </div>
+
+      <div className="space-y-4">
+        {ies.map(ieName => {
+          const ieData = hierarchy[ieName];
+          const isIEExpanded = expandedIEs.includes(ieName);
+          const grades = Object.keys(ieData.grades).sort();
+
+          return (
+            <div key={ieName} className="glass-panel overflow-hidden border-white/5 bg-white/[0.02]">
+              {/* Institution Header */}
+              <div 
+                className={cn(
+                  "px-6 py-4 flex items-center justify-between cursor-pointer transition-colors",
+                  isIEExpanded ? "bg-brand-primary/5 border-b border-white/5" : "hover:bg-white/[0.04]"
+                )}
+                onClick={() => toggleIE(ieName)}
+              >
+                <div className="flex items-center gap-4">
+                  <div className={cn(
+                    "p-2 rounded-xl transition-colors",
+                    isIEExpanded ? "bg-brand-primary text-white" : "bg-white/5 text-white/40"
+                  )}>
+                    <School size={20} />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-black text-white">{ieName}</h4>
+                    <p className="text-[10px] text-white/30 font-medium">
+                      {grades.length} Grados • {ieData.total} Estudiantes Totales
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className={cn(
+                    "w-8 h-8 rounded-full flex items-center justify-center transition-transform",
+                    isIEExpanded ? "rotate-180 text-brand-primary" : "text-white/20"
+                  )}>
+                    <ChevronDown size={20} />
+                  </div>
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); handleDeleteIE(ieName, ieData.total); }}
+                    className="p-2 text-white/10 hover:text-red-400 hover:bg-red-400/5 rounded-xl transition-all"
+                    title="Eliminar toda la Institución"
+                  >
+                    <Trash2 size={18} />
+                  </button>
                 </div>
               </div>
+
+              {/* Grades Accordion */}
+              <AnimatePresence>
+                {isIEExpanded && (
+                  <motion.div
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    className="border-t border-white/5"
+                  >
+                    <div className="p-2 space-y-2 bg-black/20">
+                      {grades.map(grade => {
+                        const gradeData = ieData.grades[grade];
+                        const gradeKey = `${ieName}-${grade}`;
+                        const isGradeExpanded = expandedGrades.includes(gradeKey);
+
+                        return (
+                          <div key={grade} className="rounded-xl border border-white/5 bg-white/[0.01] overflow-hidden">
+                            {/* Grade Header */}
+                            <div 
+                              className="px-4 py-3 flex items-center justify-between cursor-pointer hover:bg-white/[0.02]"
+                              onClick={() => toggleGrade(ieName, grade)}
+                            >
+                              <div className="flex items-center gap-3">
+                                <div className={cn(
+                                  "w-6 h-6 rounded-md flex items-center justify-center text-[10px] font-black border transition-colors",
+                                  isGradeExpanded ? "bg-brand-primary/20 border-brand-primary text-brand-primary" : "bg-white/5 border-white/10 text-white/40"
+                                )}>
+                                  {grade}°
+                                </div>
+                                <span className="text-xs font-bold text-white/80">{grade}° Grado</span>
+                                <span className="text-[10px] text-white/20">•</span>
+                                <span className="text-[10px] text-white/40 font-medium">{gradeData.count} Estudiantes</span>
+                              </div>
+                              <button 
+                                onClick={(e) => { e.stopPropagation(); handleDeleteGrade(ieName, grade, gradeData.count); }}
+                                className="p-1.5 text-white/10 hover:text-red-400 hover:bg-red-400/5 rounded-md transition-all"
+                                title="Eliminar Grado completo"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+
+                            {/* Sections List */}
+                            <AnimatePresence>
+                              {isGradeExpanded && (
+                                <motion.div
+                                  initial={{ height: 0, opacity: 0 }}
+                                  animate={{ height: "auto", opacity: 1 }}
+                                  exit={{ height: 0, opacity: 0 }}
+                                  className="bg-black/40 border-t border-white/5"
+                                >
+                                  <div className="divide-y divide-white/5">
+                                    {gradeData.sections.map((sectionGroup, sIdx) => (
+                                      <div key={sIdx} className="px-6 py-2.5 flex items-center justify-between group">
+                                        <div className="flex items-center gap-4">
+                                          <div className="w-1 h-4 bg-emerald-500/30 rounded-full" />
+                                          <div>
+                                            <p className="text-[11px] font-bold text-white/70">
+                                              Sección <span className="text-emerald-400">"{sectionGroup.section}"</span>
+                                            </p>
+                                            <p className="text-[9px] text-white/30">
+                                              {sectionGroup.periodo} • {sectionGroup.count} registros
+                                            </p>
+                                          </div>
+                                        </div>
+                                        <button 
+                                          onClick={() => handleDeleteSection(sectionGroup)}
+                                          className="p-1.5 text-white/10 group-hover:text-red-400 hover:bg-red-400/10 rounded-md transition-all opacity-0 group-hover:opacity-100"
+                                          title="Eliminar Sección"
+                                        >
+                                          <Trash2 size={14} />
+                                        </button>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </motion.div>
+                              )}
+                            </AnimatePresence>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
-            <button 
-              onClick={() => handleDeleteGroup(group)}
-              className="p-2 text-white/40 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-all"
-              title="Eliminar grupo"
-            >
-              <Trash2 size={18} />
-            </button>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
-  );
+  </div>
+);
 }
 
 function UploadZone({ title, subtitle, fileName, recordCount, color, inputRef, onDrop, onFileSelect, onClear }) {

@@ -26,7 +26,9 @@ import {
   Table as TableIcon,
   CheckCircle2,
   XCircle,
-  Trash2
+  Trash2,
+  FileText,
+  Printer
 } from 'lucide-react';
 import { MATRICES, PERIODOS } from '../lib/matrices_data';
 import { 
@@ -38,15 +40,30 @@ import {
   deleteRecordGroup,
   getPerformanceSemaphore,
   getCriticalCapacities,
-  getIEReportData
+  getIEReportData,
+  aggregateResults,
+  getStudentsAtRisk
 } from '../lib/evaluator';
-import { cn, exportToPDF } from '../lib/utils';
+import { 
+  cn, 
+  exportToPDF, 
+  generateInstitutionalPDF, 
+  generateDetailedGradePDF, 
+  generateSectionPDF 
+} from '../lib/utils';
 import EarlyWarningTable from './EarlyWarningTable';
 import { useData } from '../lib/DataContext';
+import { INSTITUTIONS } from '../lib/constants';
 
 export default function Dashboard({ data = [] }) {
   const { records, matrixOverrides, updateRecords, groups, deleteGroup, activeYear, activePeriod: globalActivePeriod } = useData();
-  const [selectedGrado, setSelectedGrado] = useState('1');
+  
+  // Jerarquía de Filtros
+  const [selectedIE, setSelectedIE] = useState('TODOS');
+  const [selectedGrade, setSelectedGrade] = useState('TODOS');
+  const [selectedSection, setSelectedSection] = useState('TODOS');
+  
+  const [selectedGrado, setSelectedGrado] = useState('1'); // Para compatibilidad con lógica antigua si se requiere
   const [selectedPeriod, setSelectedPeriod] = useState(globalActivePeriod || PERIODOS.DIAGNOSTICA);
   const [activeTab, setActiveTab] = useState('general');
   const [showClearConfirm, setShowClearConfirm] = useState(false);
@@ -54,20 +71,33 @@ export default function Dashboard({ data = [] }) {
   const [showFullReport, setShowFullReport] = useState(false);
   const [mgmtSearch, setMgmtSearch] = useState('');
 
+  // Normalizar instituciones para el selector
+  const institutions = useMemo(() => {
+    return INSTITUTIONS.map((name, index) => ({ id: name, nombre: name }));
+  }, []);
+
   // Jerarquía de Filtros y Agregación
   const filteredData = useMemo(() => {
-    let data = records;
+    let filtered = records;
     if (selectedIE !== 'TODOS') {
-      data = data.filter(r => r.id_ie === selectedIE || r.ie === selectedIE);
+      filtered = filtered.filter(r => r.id_ie === selectedIE || r.ie === selectedIE || r.institution === selectedIE);
     }
     if (selectedGrade !== 'TODOS') {
-      data = data.filter(r => r.grado === selectedGrade);
+      filtered = filtered.filter(r => String(r.grado) === String(selectedGrade.replace('ero', '').replace('do', '').replace('to', '')));
     }
     if (selectedSection !== 'TODOS') {
-      data = data.filter(r => r.seccion === selectedSection);
+      filtered = filtered.filter(r => (r.seccion || r.section || r.Seccion) === selectedSection);
     }
-    return data;
+    return filtered;
   }, [records, selectedIE, selectedGrade, selectedSection]);
+
+  // Sync selectedGrado (numeric) with selectedGrade (string like '1ero')
+  useEffect(() => {
+    if (selectedGrade !== 'TODOS') {
+      const numericGrade = selectedGrade.replace('ero', '').replace('do', '').replace('to', '');
+      setSelectedGrado(numericGrade);
+    }
+  }, [selectedGrade]);
 
   const aggregatedStats = useMemo(() => {
     const level = selectedIE === 'TODOS' ? 'UGEL' : 
@@ -102,6 +132,7 @@ export default function Dashboard({ data = [] }) {
     const readingCaps = getCapacityAverages(filteredData, selectedGrado, 'reading', selectedPeriod, matrixOverrides);
     const writingCaps = getCapacityAverages(filteredData, selectedGrado, 'writing', selectedPeriod, matrixOverrides);
     const studentList = getStudentPerformanceList(filteredData, selectedGrado, matrixOverrides);
+    const riskStudents = getStudentsAtRisk(filteredData, matrixOverrides);
     const gradeStatus = getGradeStatusSummary(filteredData, selectedGrado, selectedPeriod, matrixOverrides);
 
     return {
@@ -110,6 +141,7 @@ export default function Dashboard({ data = [] }) {
       readingCaps,
       writingCaps,
       studentList,
+      riskStudents,
       gradeStatus,
       totalStudents: filteredData.length,
       readingSatisfactory: readingLevels.find(l => l.name === 'Satisfactorio')?.percentage || 0,
@@ -117,7 +149,7 @@ export default function Dashboard({ data = [] }) {
     };
   }, [filteredData, selectedGrado, selectedPeriod, matrixOverrides]);
 
-  if (!stats) {
+  if (stats === null) {
     return (
       <div className="flex flex-col items-center justify-center py-24 text-center">
         <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center text-white/20 mb-6">
@@ -127,7 +159,19 @@ export default function Dashboard({ data = [] }) {
         <p className="text-white/40 max-w-sm mb-8">
           Seleccione un grado con registros o ingrese nuevos datos en el módulo de registro.
         </p>
-    <div className="min-h-screen bg-[#0a0f1d] text-white p-4 md:p-8">
+      </div>
+    );
+  }
+
+  const enElGradoPct = (stats?.gradeStatus?.total || 0) > 0 
+    ? ((stats.gradeStatus.enElGrado / stats.gradeStatus.total) * 100).toFixed(1) 
+    : '0.0';
+  const previoAlGradoPct = (stats?.gradeStatus?.total || 0) > 0 
+    ? ((stats.gradeStatus.previoAlGrado / stats.gradeStatus.total) * 100).toFixed(1) 
+    : '0.0';
+
+  return (
+    <div className="min-h-screen bg-[#0a0f1d] text-white p-4 md:p-8 space-y-8">
       {/* Panel de Filtros Jerárquicos */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8 bg-white/5 p-6 rounded-2xl border border-white/10 backdrop-blur-xl">
         <div className="space-y-2">
@@ -168,13 +212,16 @@ export default function Dashboard({ data = [] }) {
         <div className="space-y-2">
           <label className="text-xs font-semibold text-blue-400 uppercase tracking-wider">Sección</label>
           <select 
-            className="w-full bg-[#1a2235] border border-white/10 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500"
+            className="w-full bg-[#1a2235] border border-white/10 rounded-lg p-3 text-sm focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
             value={selectedSection}
             onChange={(e) => setSelectedSection(e.target.value)}
+            disabled={selectedGrade === 'TODOS'}
           >
             <option value="TODOS">Todas las Secciones</option>
-            {/* Lógica para filtrar secciones existentes según el grado */}
-            {[...new Set(records.filter(r => r.grado === selectedGrade).map(r => r.seccion))].sort().map(s => (
+            {[...new Set(records.filter(r => 
+              (selectedGrade === 'TODOS' || String(r.grado) === selectedGrade.replace('ero', '').replace('do', '').replace('to', '')) && 
+              (selectedIE === 'TODOS' || r.id_ie === selectedIE || r.ie === selectedIE || r.institution === selectedIE)
+            ).map(r => r.seccion || r.section || r.Seccion))].sort().filter(Boolean).map(s => (
               <option key={s} value={s}>{s}</option>
             ))}
           </select>
@@ -204,19 +251,8 @@ export default function Dashboard({ data = [] }) {
           </button>
         </div>
       </div>
-      </div>
-    );
-  }
 
-  const enElGradoPct = stats.gradeStatus.total > 0 
-    ? ((stats.gradeStatus.enElGrado / stats.gradeStatus.total) * 100).toFixed(1) 
-    : '0.0';
-  const previoAlGradoPct = stats.gradeStatus.total > 0 
-    ? ((stats.gradeStatus.previoAlGrado / stats.gradeStatus.total) * 100).toFixed(1) 
-    : '0.0';
-
-  return (
-    <div className="space-y-8">
+      <div className="space-y-8">
       {/* Header with Selector */}
         <div className="flex items-center justify-between">
           <div>
@@ -229,11 +265,11 @@ export default function Dashboard({ data = [] }) {
               <div className="flex items-center gap-2">
                 <span className="px-2 py-0.5 rounded-md bg-brand-primary/10 border border-brand-primary/20 text-[10px] font-bold text-brand-primary uppercase">Año {activeYear}</span>
                 <span className="px-2 py-0.5 rounded-md bg-brand-secondary/10 border border-brand-secondary/20 text-[10px] font-bold text-brand-secondary uppercase">{selectedPeriod}</span>
-              </div>
             </div>
           </div>
+        </div>
 
-          {/* Semaforización Indicator */}
+        {/* Semaforización Indicator */}
           <div className="hidden md:flex items-center gap-4 px-4 py-2 bg-white/5 border border-white/10 rounded-2xl">
             <div className="flex flex-col items-end">
               <span className="text-[10px] font-bold text-white/40 uppercase">Estado de Alerta</span>
@@ -313,6 +349,7 @@ export default function Dashboard({ data = [] }) {
             <BookOpen size={16} /> Generar Informe Institucional
           </button>
         </div>
+
 
       {/* Clear Confirmation Modal (Simple) */}
       <AnimatePresence>
@@ -551,18 +588,18 @@ export default function Dashboard({ data = [] }) {
                 </h2>
                 <button 
                   onClick={() => exportToPDF({
-                    grade: selectedGrado,
+                    grade: selectedGrade,
                     period: selectedPeriod,
                     year: activeYear,
-                    institution: filteredData[0]?.institution || 'IE Desconocida',
-                    studentsCount: filteredData.length
+                    institution: selectedIE === 'TODOS' ? 'UGEL 16 BARRANCA' : selectedIE,
+                    studentsCount: stats.riskStudents.length
                   })}
                   className="flex items-center gap-2 px-4 py-2 bg-brand-primary/10 border border-brand-primary/20 rounded-xl text-xs font-bold text-brand-primary hover:bg-brand-primary/20 transition-all"
                 >
-                  <TrendingUp size={14} /> Exportar Ficha Técnica
+                  <TrendingUp size={14} /> Exportar Lista de Riesgo
                 </button>
               </div>
-              <EarlyWarningTable performanceData={stats.studentList} />
+              <EarlyWarningTable performanceData={stats.riskStudents} />
             </div>
           )}
           {activeTab === 'general' && (
@@ -590,6 +627,7 @@ export default function Dashboard({ data = [] }) {
           />
         )}
       </AnimatePresence>
+      </div>
     </div>
   );
 }
@@ -1058,10 +1096,18 @@ function DataGroupsList({ searchTerm }) {
     return groups.filter(g => g.ie.toLowerCase().includes(searchTerm.toLowerCase()));
   }, [groups, searchTerm]);
 
-  const handleDeleteGroup = (group) => {
-    if (!confirm(`¿Está seguro de eliminar ${group.count} registros de ${group.ie} - ${group.grado}° ${group.section} (${group.periodo})?`)) return;
-    deleteGroup(group);
-  };
+  // Agrupación jerárquica para el Dashboard
+  const hierarchy = useMemo(() => {
+    const tree = {};
+    filteredGroups.forEach(g => {
+      const ie = g.ie || 'Sin IE';
+      if (!tree[ie]) tree[ie] = { grades: {}, total: 0 };
+      if (!tree[ie].grades[g.grado]) tree[ie].grades[g.grado] = [];
+      tree[ie].grades[g.grado].push(g);
+      tree[ie].total += g.count;
+    });
+    return tree;
+  }, [filteredGroups]);
 
   if (filteredGroups.length === 0) {
     return (
@@ -1072,31 +1118,41 @@ function DataGroupsList({ searchTerm }) {
   }
 
   return (
-    <div className="divide-y divide-white/5">
-      {filteredGroups.map((group, idx) => (
-        <div key={idx} className="p-4 flex items-center justify-between hover:bg-white/5 transition-all">
-          <div className="flex items-center gap-4">
-            <div className="w-10 h-10 bg-white/5 rounded-xl flex items-center justify-center text-white/40">
-              <span className="text-sm font-bold">{group.grado}°</span>
-            </div>
-            <div>
-              <p className="text-sm font-bold text-white">{group.ie}</p>
-              <div className="flex gap-2 mt-0.5">
-                <span className="text-[10px] text-brand-primary font-bold uppercase">{group.section}</span>
-                <span className="text-[10px] text-white/20">•</span>
-                <span className="text-[10px] text-emerald-400 font-bold uppercase">{group.periodo}</span>
-                <span className="text-[10px] text-white/20">•</span>
-                <span className="text-[10px] text-white/40">{group.count} estudiantes</span>
-              </div>
-            </div>
+    <div className="space-y-4 p-2">
+      {Object.keys(hierarchy).map(ie => (
+        <div key={ie} className="glass-panel p-4 border-white/5 bg-white/[0.02]">
+          <div className="flex items-center justify-between mb-4 pb-2 border-b border-white/5">
+             <div className="flex items-center gap-3">
+                <School className="text-brand-primary" size={18} />
+                <h4 className="font-black text-white text-sm uppercase">{ie}</h4>
+             </div>
+             <span className="text-[10px] font-bold text-white/40">{hierarchy[ie].total} registros</span>
           </div>
-          <button 
-            onClick={() => handleDeleteGroup(group)}
-            className="p-3 text-white/20 hover:text-red-500 hover:bg-red-500/10 rounded-xl transition-all"
-            title="Eliminar lote de datos"
-          >
-            <Trash2 size={20} />
-          </button>
+          <div className="space-y-2">
+            {Object.keys(hierarchy[ie].grades).sort().map(grado => (
+              <div key={grado} className="pl-4 border-l-2 border-white/5 space-y-1">
+                <p className="text-[10px] font-black text-white/20 uppercase mb-1">{grado}° Grado</p>
+                {hierarchy[ie].grades[grado].map((group, idx) => (
+                  <div key={idx} className="flex items-center justify-between py-1 px-2 hover:bg-white/5 rounded-lg group">
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs font-bold text-emerald-400">Sec. {group.section}</span>
+                      <span className="text-[10px] text-white/40">{group.periodo} • {group.count} est.</span>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        if (confirm(`¿Eliminar ${group.count} registros de ${group.ie} ${group.grado}° ${group.section}?`)) {
+                          deleteGroup(group);
+                        }
+                      }}
+                      className="p-1.5 text-white/10 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
         </div>
       ))}
     </div>

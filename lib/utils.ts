@@ -3,7 +3,7 @@ import { twMerge } from "tailwind-merge"
 import JSZip from "jszip"
 import { jsPDF } from "jspdf"
 import html2canvas from "html2canvas"
-import { getIEReportData, getGlobalFilters, getAchievementLevels } from "./evaluator"
+import { getIEReportData, getGlobalFilters, getAchievementLevels, aggregateResults } from "./evaluator"
 
 export function cn(...inputs) {
   return twMerge(clsx(inputs))
@@ -189,15 +189,18 @@ export async function exportToPDF(metadata, charts = {}) {
 export const generateZipOfReports = async (
   institutions: any[],
   allRecords: any[],
+  activePeriod: string,
+  activeYear: string,
+  matrixOverrides: any,
   onProgress: (progress: number) => void
 ) => {
   const zip = new JSZip();
 
-  for (let i = 0; i < ies.length; i++) {
-    const ie = ies[i];
-    onProgress(Math.round(((i + 1) / ies.length) * 100));
+  for (let i = 0; i < institutions.length; i++) {
+    const ie = institutions[i];
+    onProgress(Math.round(((i + 1) / institutions.length) * 100));
     
-    const reportData = getIEReportData(allRecords, ie.id || ie.name, activePeriod, matrixOverrides);
+    const reportData = getIEReportData(allRecords, ie.id || ie.nombre, activePeriod, matrixOverrides);
     if (!reportData) continue;
 
     const doc = new jsPDF();
@@ -334,38 +337,61 @@ export const generateZipOfReports = async (
   }
 
   const zipContent = await zip.generateAsync({ type: "blob" });
-  saveAs(zipContent, `Reportes_Institucionales_${new Date().getFullYear()}.zip`);
+  
+  // Custom saveAs implementation since file-saver is missing
+  const url = URL.createObjectURL(zipContent);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `Reportes_Institucionales_${activeYear}.zip`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 };
 /**
  * Genera un PDF institucional con una página por grado
  */
 export const generateInstitutionalPDF = async (ieName: string, records: any[]) => {
   const doc = new jsPDF('p', 'mm', 'a4');
-  const grades = ['1ero', '2do', '3ero', '4to', '5to'];
+  // Extract unique grades from records or use a more complete default set
+  const grades = [...new Set(records.map(r => r.grado))].sort();
   
+  if (grades.length === 0) {
+    console.error("No records found for IE", ieName);
+    return;
+  }
+
   for (let i = 0; i < grades.length; i++) {
     const grade = grades[i];
-    const gradeRecords = records.filter(r => r.grado === grade);
+    // Filtro flexible: reconoce ID modular o nombre de IE para evitar reportes vacíos
+    const gradeRecords = records.filter(r => 
+      (String(r.grado) === String(grade)) && 
+      (String(r.id_ie) === String(ieName) || String(r.institution || r.IE) === String(ieName))
+    );
     
-    if (i > 0) doc.addPage();
+    if (gradeRecords.length === 0) continue; // Skip grades with no data for this specific IE
+    
+    if (i > 0 && doc.getNumberOfPages() > 0) doc.addPage();
     
     // Header
     doc.setFillColor(30, 41, 59);
     doc.rect(0, 0, 210, 35, 'F');
     doc.setTextColor(255, 255, 255);
     doc.setFontSize(18);
+    doc.setFont("helvetica", "bold");
     doc.text(`REPORTE INSTITUCIONAL - ${grade}`, 105, 15, { align: 'center' });
     doc.setFontSize(10);
+    doc.setFont("helvetica", "normal");
     doc.text(`I.E. ${ieName}`, 105, 25, { align: 'center' });
 
     // Bloque Lectura
-    renderCompetencyBlock(doc, 'LECTURA', gradeRecords.filter(r => r.competencia === 'Lectura'), 45);
+    renderCompetencyBlock(doc, 'LECTURA', gradeRecords, 45);
     
     // Bloque Escritura
-    renderCompetencyBlock(doc, 'ESCRITURA', gradeRecords.filter(r => r.competencia === 'Escritura'), 150);
+    renderCompetencyBlock(doc, 'ESCRITURA', gradeRecords, 150);
   }
   
-  doc.save(`Reporte_Institucional_${ieName}.pdf`);
+  doc.save(`Reporte_Institucional_${ieName.replace(/\s+/g, '_')}.pdf`);
 };
 
 /**
@@ -373,20 +399,21 @@ export const generateInstitutionalPDF = async (ieName: string, records: any[]) =
  */
 export const generateDetailedGradePDF = async (ieName: string, grade: string, records: any[]) => {
   const doc = new jsPDF('p', 'mm', 'a4');
-  const sections = [...new Set(records.map(r => r.seccion))].sort();
+  const sections = [...new Set(records.map(r => r.section || r.seccion || 'Única'))].sort();
   
   sections.forEach((section, idx) => {
     if (idx > 0) doc.addPage();
-    const sectionRecords = records.filter(r => r.seccion === section);
+    const sectionRecords = records.filter(r => (r.section || r.seccion || 'Única') === section);
     
     doc.setFontSize(16);
+    doc.setFont("helvetica", "bold");
     doc.text(`${grade} Sección "${section}"`, 105, 20, { align: 'center' });
     
-    renderCompetencyBlock(doc, 'LECTURA', sectionRecords.filter(r => r.competencia === 'Lectura'), 40);
-    renderCompetencyBlock(doc, 'ESCRITURA', sectionRecords.filter(r => r.competencia === 'Escritura'), 140);
+    renderCompetencyBlock(doc, 'LECTURA', sectionRecords, 40);
+    renderCompetencyBlock(doc, 'ESCRITURA', sectionRecords, 140);
   });
   
-  doc.save(`Reporte_Grado_${grade}_${ieName}.pdf`);
+  doc.save(`Reporte_Grado_${grade}_${ieName.replace(/\s+/g, '_')}.pdf`);
 };
 
 /**
@@ -394,33 +421,54 @@ export const generateDetailedGradePDF = async (ieName: string, grade: string, re
  */
 export const generateSectionPDF = async (ieName: string, grade: string, section: string, records: any[]) => {
   const doc = new jsPDF('p', 'mm', 'a4');
+  doc.setFontSize(16);
+  doc.setFont("helvetica", "bold");
   doc.text(`REPORTE DE AULA: ${grade} "${section}"`, 105, 20, { align: 'center' });
   
-  renderCompetencyBlock(doc, 'LECTURA', records.filter(r => r.competencia === 'Lectura'), 40);
-  renderCompetencyBlock(doc, 'ESCRITURA', records.filter(r => r.competencia === 'Escritura'), 140);
+  renderCompetencyBlock(doc, 'LECTURA', records, 40);
+  renderCompetencyBlock(doc, 'ESCRITURA', records, 140);
   
   doc.save(`Reporte_Aula_${grade}_${section}.pdf`);
 };
 
+import { normalizeCompetency } from './evaluator';
+
 const renderCompetencyBlock = (doc: jsPDF, title: string, data: any[], yPos: number) => {
-  doc.setTextColor(0, 0, 0);
+  doc.setTextColor(30, 41, 59);
   doc.setFont("helvetica", "bold");
+  doc.setFontSize(12);
   doc.text(`COMPETENCIA: ${title}`, 20, yPos);
   
-  const stats = aggregateResults(data, 'SECCION');
-  if (!stats) {
+  const compType = normalizeCompetency(title);
+
+  const stats = aggregateResults(data, 'SECCION'); // aggregateResults already uses getAchievementLevels internally
+
+  if (!stats || !stats[compType] || stats[compType].length === 0) {
     doc.setFont("helvetica", "italic");
-    doc.text("No se registraron datos para esta competencia.", 25, yPos + 10);
+    doc.setFontSize(10);
+    doc.text("No se registraron datos para esta competencia en este grupo.", 25, yPos + 10);
     return;
   }
 
-  const levels = ['Logrado', 'Proceso', 'Inicio'];
-  levels.forEach((lvl, i) => {
-    const val = stats.percentages[lvl as keyof typeof stats.percentages];
+  const compStats = stats[compType];
+  
+  compStats.forEach((lvl, i) => {
+    const val = parseFloat(lvl.percentage);
+    const label = lvl.name;
+    
     doc.setFontSize(9);
-    doc.text(`${lvl}: ${val}%`, 30 + (i * 50), yPos + 10);
-    doc.setFillColor(lvl === 'Logrado' ? 34 : lvl === 'Proceso' ? 234 : 239, lvl === 'Logrado' ? 197 : lvl === 'Proceso' ? 179 : 68, lvl === 'Logrado' ? 94 : lvl === 'Proceso' ? 8 : 68);
-    doc.rect(30 + (i * 50), yPos + 12, val * 0.4, 4, 'F');
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(80, 80, 80);
+    doc.text(`${label}: ${val}%`, 30 + (i * 50), yPos + 10);
+    
+    // Progress bar
+    let color = [200, 200, 200];
+    if (label === 'Satisfactorio' || label === 'Logrado') color = [16, 185, 129];
+    else if (label === 'Proceso') color = [245, 158, 11];
+    else if (label === 'Inicio') color = [239, 68, 68];
+    
+    doc.setFillColor(color[0], color[1], color[2]);
+    doc.rect(30 + (i * 50), yPos + 12, Math.max(val * 0.4, 1), 4, 'F');
   });
 };
 

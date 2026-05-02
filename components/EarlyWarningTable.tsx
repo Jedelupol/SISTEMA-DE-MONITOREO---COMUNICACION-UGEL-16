@@ -19,8 +19,9 @@ export default function EarlyWarningTable({ performanceData }) {
         <thead>
           <tr className="border-b border-white/10 bg-white/[0.03]">
             <th className="py-5 px-6 text-xs font-bold uppercase tracking-widest text-white/40">Estudiante</th>
-            <th className="py-5 px-6 text-xs font-bold uppercase tracking-widest text-white/40 text-center">Nivel Lectura</th>
-            <th className="py-5 px-6 text-xs font-bold uppercase tracking-widest text-white/40 text-center">Nivel Escritura</th>
+            <th className="py-5 px-6 text-xs font-bold uppercase tracking-widest text-white/40 text-center">Grado</th>
+            <th className="py-5 px-6 text-xs font-bold uppercase tracking-widest text-white/40 text-center">Sección</th>
+            <th className="py-5 px-6 text-xs font-bold uppercase tracking-widest text-white/40 text-center">Puntaje (L/E)</th>
             <th className="py-5 px-6 text-xs font-bold uppercase tracking-widest text-white/40 text-center">Acción Sugerida</th>
           </tr>
         </thead>
@@ -30,7 +31,7 @@ export default function EarlyWarningTable({ performanceData }) {
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: idx * 0.05 }}
-              key={student.name}
+              key={`${student.name}-${student.dni}-${idx}`}
               className="border-b border-white/[0.05] hover:bg-white/[0.03] transition-colors"
             >
               <td className="py-5 px-6">
@@ -38,10 +39,16 @@ export default function EarlyWarningTable({ performanceData }) {
                 <div className="text-[10px] text-white/20 uppercase tracking-wider">DNI: {student.dni || 'N/A'}</div>
               </td>
               <td className="py-5 px-6 text-center">
-                <LevelBadge level={student.readingLevel} percentage={student.readingPercentage} />
+                <span className="text-sm font-bold text-blue-400">{student.grado}°</span>
               </td>
               <td className="py-5 px-6 text-center">
-                <LevelBadge level={student.writingLevel} percentage={student.writingPercentage} />
+                <span className="text-sm font-bold text-purple-400">{student.section}</span>
+              </td>
+              <td className="py-5 px-6 text-center">
+                <div className="flex flex-col items-center gap-1">
+                  <span className="text-xs font-bold text-white">L: {student.readingScore}</span>
+                  <span className="text-xs font-bold text-pink-400">E: {student.writingScore}</span>
+                </div>
               </td>
               <td className="py-5 px-6 text-center">
                 <ActionBadge level={student.readingLevel} />

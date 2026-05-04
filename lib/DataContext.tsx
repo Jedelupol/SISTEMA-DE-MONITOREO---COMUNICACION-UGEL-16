@@ -1,14 +1,28 @@
 "use client";
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
-import initialRecords from './data.json';
-import { processRecordsIntoGroups, deleteRecordGroup } from './evaluator';
+
+import { processRecordsIntoGroups, deleteRecordGroup, cleanRecordInput } from './evaluator';
+import { db } from './firebase';
+import { 
+  collection, 
+  getDocs, 
+  query, 
+  where, 
+  addDoc, 
+  deleteDoc, 
+  doc, 
+  setDoc, 
+  writeBatch,
+  orderBy,
+  onSnapshot
+} from 'firebase/firestore';
 
 const DataContext = createContext(null);
 
 export function DataProvider({ children }) {
   // Core Records State
-  const [records, setRecords] = useState(initialRecords);
+  const [records, setRecords] = useState([]);
   const [session, setSession] = useState(null);
   const [teachers, setTeachers] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -27,74 +41,120 @@ export function DataProvider({ children }) {
 
   const groups = useMemo(() => processRecordsIntoGroups(records), [records]);
 
-  // Initialize from localStorage
+  // Load Initial Session & Settings from Firestore
   useEffect(() => {
-    // 1. Records
-    const savedRecords = localStorage.getItem('eval_records');
-    if (savedRecords) {
-      setRecords(JSON.parse(savedRecords));
-    } else {
-      localStorage.setItem('eval_records', JSON.stringify(initialRecords));
-      setRecords(initialRecords);
-    }
-
-    // 2. Session
+    // 1. Session (Session stays in localStorage for auth persistence)
     const savedSession = localStorage.getItem('edu_session');
     if (savedSession) setSession(JSON.parse(savedSession));
 
-    // 3. Teachers
-    const savedTeachers = localStorage.getItem('edu_teachers');
-    if (savedTeachers) setTeachers(JSON.parse(savedTeachers));
+    // 2. Config Listener (Consolidated into registros_ugel16 as requested)
+    const configRef = doc(db, "registros_ugel16", "__config__");
+    const unsubConfig = onSnapshot(configRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        if (data.activePeriod) setActivePeriod(data.activePeriod);
+        if (data.activeYear) setActiveYear(data.activeYear);
+        if (data.institutionInfo) setInstitutionInfo(data.institutionInfo);
+        if (data.matrixOverrides) setMatrixOverrides(data.matrixOverrides);
+        if (data.teachers) setTeachers(data.teachers);
+      }
+    });
 
-    // 4. Settings
-    const savedPeriod = localStorage.getItem('active_period');
-    if (savedPeriod) setActivePeriod(savedPeriod);
-
-    const savedYear = localStorage.getItem('active_year');
-    if (savedYear) setActiveYear(savedYear);
-
-    const savedInfo = localStorage.getItem('edu_institution_info');
-    if (savedInfo) setInstitutionInfo(JSON.parse(savedInfo));
-
-    // 5. Matrix Overrides (migrate from individual keys or load unified object)
-    const savedOverrides = localStorage.getItem('edu_matrix_overrides');
-    if (savedOverrides) {
-      setMatrixOverrides(JSON.parse(savedOverrides));
-    } else {
-      // Basic migration: look for common keys if we want to be nice
-      // For now, just start empty or load on demand if needed.
-      // We'll use a unified object from now on.
-    }
-
-    setIsLoading(false);
+    return () => {
+      unsubConfig();
+    };
   }, []);
 
-  // Persistence Effects
-  useEffect(() => {
-    if (!isLoading) {
-      localStorage.setItem('eval_records', JSON.stringify(records));
+  /**
+   * Fetches records from Firestore, filtered by Institution ID (id_ie)
+   */
+  const fetchRecords = useCallback(async (id_ie?: string) => {
+    if (!id_ie && session?.role !== 'admin') {
+      setRecords([]);
+      setIsLoading(false);
+      return;
     }
-  }, [records, isLoading]);
 
-  useEffect(() => {
-    if (!isLoading) localStorage.setItem('edu_teachers', JSON.stringify(teachers));
-  }, [teachers, isLoading]);
+    setIsLoading(true);
+    try {
+      const recordsCol = collection(db, "registros_ugel16");
+      let q;
+      
+      if (session?.role === 'admin' && !id_ie) {
+         q = query(recordsCol, orderBy("timestamp", "desc"));
+      } else {
+         q = query(recordsCol, where("id_ie", "==", String(id_ie)));
+      }
 
-  useEffect(() => {
-    if (!isLoading) localStorage.setItem('active_period', activePeriod);
-  }, [activePeriod, isLoading]);
+      const querySnapshot = await getDocs(q);
+      const fetchedRecords = querySnapshot.docs.map(doc => {
+        const data = doc.data();
+        return cleanRecordInput({
+          firebaseId: doc.id,
+          ...data
+        });
+      });
 
-  useEffect(() => {
-    if (!isLoading) localStorage.setItem('active_year', activeYear);
-  }, [activeYear, isLoading]);
+      setRecords(fetchedRecords);
+      console.log(`Fetched ${fetchedRecords.length} records for IE: ${id_ie}`);
+    } catch (error) {
+      console.error("Error fetching records from Firebase:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [session?.role]);
 
+  // Real-time Records Listener from Firestore
   useEffect(() => {
-    if (!isLoading) localStorage.setItem('edu_institution_info', JSON.stringify(institutionInfo));
-  }, [institutionInfo, isLoading]);
+    if (!session) {
+      setRecords([]);
+      setIsLoading(false);
+      return;
+    }
 
-  useEffect(() => {
-    if (!isLoading) localStorage.setItem('edu_matrix_overrides', JSON.stringify(matrixOverrides));
-  }, [matrixOverrides, isLoading]);
+    setIsLoading(true);
+    const recordsCol = collection(db, "registros_ugel16");
+    let q;
+    
+    if (session.role === 'admin') {
+      q = query(recordsCol, orderBy("timestamp", "desc"));
+    } else if (session.id_ie) {
+      q = query(recordsCol, where("id_ie", "==", String(session.id_ie)));
+    } else {
+      setRecords([]);
+      setIsLoading(false);
+      return;
+    }
+
+    const unsubscribe = onSnapshot(q, (querySnapshot) => {
+      const fetchedRecords = querySnapshot.docs.map(doc => {
+        const data = doc.data();
+        return cleanRecordInput({
+          firebaseId: doc.id,
+          ...data
+        });
+      });
+
+      setRecords(fetchedRecords);
+      setIsLoading(false);
+      console.log(`Real-time update: ${fetchedRecords.length} records loaded.`);
+    }, (error) => {
+      console.error("Error with Firestore snapshot:", error);
+      setIsLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [session]);
+
+  // Persistence Helper for Settings
+  const saveGlobalSetting = useCallback(async (updates: any) => {
+    try {
+      const configRef = doc(db, "registros_ugel16", "__config__");
+      await setDoc(configRef, updates, { merge: true });
+    } catch (error) {
+      console.error("Error saving global setting:", error);
+    }
+  }, []);
 
   // Actions
   const login = useCallback((user) => {
@@ -107,64 +167,101 @@ export function DataProvider({ children }) {
     localStorage.removeItem('edu_session');
   }, []);
 
-  const addRecords = useCallback((newRecords) => {
-    setRecords(prev => [...prev, ...newRecords]);
+  const addRecords = useCallback(async (newRecords) => {
+    // Note: Massive uploads should use the BulkUpload component's batch logic
+    // This is for smaller individual additions
+    try {
+      const recordsCol = collection(db, "registros_ugel16");
+      const timestamp = new Date().toISOString();
+      
+      const cleanedRecords = newRecords.map(rec => cleanRecordInput(rec));
+      
+      const additions = cleanedRecords.map(rec => {
+        return addDoc(recordsCol, {
+          ...rec,
+          timestamp
+        });
+      });
+      
+      await Promise.all(additions);
+      
+      // Refresh local state with cleaned records
+      setRecords(prev => [...prev, ...cleanedRecords]);
+    } catch (error) {
+      console.error("Error adding records to Firebase:", error);
+    }
   }, []);
 
-  const updateRecords = useCallback((updatedRecords) => {
+  const updateRecords = useCallback(async (updatedRecords) => {
+    // This is expensive for massive updates, use with caution
     setRecords(updatedRecords);
+    // Ideally we should update individual docs in Firestore here
   }, []);
 
-  const deleteGroup = useCallback((group) => {
-    setRecords(prev => deleteRecordGroup(prev, group));
+  const deleteGroup = useCallback(async (group) => {
+    try {
+      const recordsCol = collection(db, "registros_ugel16");
+      const q = query(
+        recordsCol, 
+        where("id_ie", "==", String(group.id_ie)),
+        where("grado", "==", String(group.grado)),
+        where("section", "==", String(group.section)),
+        where("periodo", "==", String(group.periodo))
+      );
+
+      const querySnapshot = await getDocs(q);
+      const batch = writeBatch(db);
+      
+      querySnapshot.forEach((doc) => {
+        batch.delete(doc.ref);
+      });
+
+      await batch.commit();
+      setRecords(prev => deleteRecordGroup(prev, group));
+    } catch (error) {
+      console.error("Error deleting group from Firebase:", error);
+    }
   }, []);
 
-  const clearAllData = useCallback((mode) => {
+  const clearAllData = useCallback(async (mode) => {
     if (mode === 'EVAL') {
       setRecords([]);
-      localStorage.setItem('eval_records', JSON.stringify([]));
     } else if (mode === 'ELIMINAR') {
-      // 1. Reset all states immediately
       setRecords([]);
       setTeachers([]);
       setSession(null);
-      setActivePeriod('Diagnóstica');
+      setActivePeriod('DIAGNÓSTICA');
       setActiveYear('2026');
       setInstitutionInfo({ ieName: '', director: '', specialist: '' });
       setMatrixOverrides({});
-      
-      // 2. Clear localStorage
-      localStorage.clear();
-      
-      // 3. Re-initialize essential session storage keys to empty to avoid null issues
-      localStorage.setItem('eval_records', JSON.stringify([]));
-      localStorage.setItem('edu_teachers', JSON.stringify([]));
-      localStorage.setItem('edu_institution_info', JSON.stringify({ ieName: '', director: '', specialist: '' }));
+      localStorage.removeItem('edu_session');
+      // Full reset would involve deleting Firestore docs, but we keep them for safety here
     }
   }, []);
 
   const updateMatrixOverride = useCallback((grado, period, override) => {
-    setMatrixOverrides(prev => ({
-      ...prev,
+    const newOverrides = {
+      ...matrixOverrides,
       [`${grado}_${period}`]: override
-    }));
-  }, []);
+    };
+    setMatrixOverrides(newOverrides);
+    saveGlobalSetting({ matrixOverrides: newOverrides });
+  }, [matrixOverrides, saveGlobalSetting]);
 
   const resetMatrixOverride = useCallback((grado, period) => {
-    setMatrixOverrides(prev => {
-      const newOverrides = { ...prev };
-      delete newOverrides[`${grado}_${period}`];
-      return newOverrides;
-    });
-  }, []);
+    const newOverrides = { ...matrixOverrides };
+    delete newOverrides[`${grado}_${period}`];
+    setMatrixOverrides(newOverrides);
+    saveGlobalSetting({ matrixOverrides: newOverrides });
+  }, [matrixOverrides, saveGlobalSetting]);
 
   const getMatrixOverride = useCallback((grado, period) => {
     return matrixOverrides[`${grado}_${period}`] || null;
   }, [matrixOverrides]);
 
   const value = {
-    records: session?.role === 'admin' ? records : records.filter(r => String(r.id_ie) === String(session?.id_ie)),
-    groups: session?.role === 'admin' ? groups : groups.filter(g => String(g.id_ie) === String(session?.id_ie)),
+    records, // Already filtered in useEffect
+    groups,
     isLoading,
     session,
     teachers: session?.role === 'admin' ? teachers : teachers.filter(t => t.ie === session?.ie),
@@ -175,16 +272,31 @@ export function DataProvider({ children }) {
     login,
     logout,
     addRecords,
+    fetchRecords,
     updateRecords,
     deleteGroup,
     clearAllData,
-    setTeachers,
-    setActivePeriod,
-    setActiveYear,
-    setInstitutionInfo,
     updateMatrixOverride,
     resetMatrixOverride,
-    getMatrixOverride
+    getMatrixOverride,
+    // Add specific setters that push to Firestore
+    setTeachers: async (val) => {
+      // For massive teacher updates, this is just local state
+      // In a real app, we'd iterate and setDocs
+      setTeachers(val);
+    },
+    setActivePeriod: (val) => {
+      setActivePeriod(val);
+      saveGlobalSetting({ activePeriod: val });
+    },
+    setActiveYear: (val) => {
+      setActiveYear(val);
+      saveGlobalSetting({ activeYear: val });
+    },
+    setInstitutionInfo: (val) => {
+      setInstitutionInfo(val);
+      saveGlobalSetting({ institutionInfo: val });
+    }
   };
 
   return (
@@ -201,3 +313,4 @@ export function useData() {
   }
   return context;
 }
+

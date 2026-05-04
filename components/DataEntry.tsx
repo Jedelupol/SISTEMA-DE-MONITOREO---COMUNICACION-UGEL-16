@@ -7,6 +7,7 @@ import { MATRICES, PERIODOS } from '../lib/matrices_data';
 import { UGELS, INSTITUTIONS, SECTIONS } from '../lib/constants';
 import { cn } from '../lib/utils';
 import { useData } from '../lib/DataContext';
+import { cleanRecordInput } from '../lib/evaluator';
 
 export default function DataEntry({ onComplete, session }) {
   const { addRecords, activePeriod, getMatrixOverride } = useData();
@@ -80,13 +81,14 @@ export default function DataEntry({ onComplete, session }) {
     localStorage.setItem('teacher_settings', JSON.stringify({ ugel, institution, grado, section, periodo }));
     
     // In a real app, this would save to a database
-    const newRecord = {
+    const baseRecord = {
       studentName,
       dni,
       grado,
       section,
       ugel,
       institution,
+      id_ie: session?.id_ie || '',
       periodo,
       ...responses,
       teacherDni: session?.dni || 'ADMIN',
@@ -94,6 +96,7 @@ export default function DataEntry({ onComplete, session }) {
       timestamp: new Date().toISOString()
     };
 
+    const newRecord = cleanRecordInput(baseRecord);
     addRecords([newRecord]);
 
     setTimeout(() => {

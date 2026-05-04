@@ -28,21 +28,16 @@ import {
   XCircle,
   Trash2,
   FileText,
-  Printer
+  Printer,
+  School
 } from 'lucide-react';
 import { MATRICES, PERIODOS } from '../lib/matrices_data';
 import { 
-  getAchievementLevels, 
-  getCapacityAverages, 
-  getStudentPerformanceList, 
-  getGradeStatusSummary, 
-  processRecordsIntoGroups, 
-  deleteRecordGroup,
   getPerformanceSemaphore,
   getCriticalCapacities,
-  getIEReportData,
   aggregateResults,
-  getStudentsAtRisk
+  processAllStats,
+  normalizeString
 } from '../lib/evaluator';
 import { 
   cn, 
@@ -52,6 +47,7 @@ import {
   generateSectionPDF 
 } from '../lib/utils';
 import EarlyWarningTable from './EarlyWarningTable';
+import FullInstitutionalReport from './FullInstitutionalReport';
 import { useData } from '../lib/DataContext';
 import { INSTITUTIONS } from '../lib/constants';
 
@@ -78,17 +74,34 @@ export default function Dashboard({ data = [] }) {
 
   // Jerarquía de Filtros y Agregación
   const filteredData = useMemo(() => {
-    let filtered = records;
-    if (selectedIE !== 'TODOS') {
-      filtered = filtered.filter(r => r.id_ie === selectedIE || r.ie === selectedIE || r.institution === selectedIE);
-    }
-    if (selectedGrade !== 'TODOS') {
-      filtered = filtered.filter(r => String(r.grado) === String(selectedGrade.replace('ero', '').replace('do', '').replace('to', '')));
-    }
-    if (selectedSection !== 'TODOS') {
-      filtered = filtered.filter(r => (r.seccion || r.section || r.Seccion) === selectedSection);
-    }
-    return filtered;
+    if (!records || records.length === 0) return [];
+    
+    // Pre-calculate normalized filter values to avoid re-calculating inside the filter loop
+    const filterIE = selectedIE !== 'TODOS' ? normalizeString(selectedIE) : null;
+    const filterGrade = selectedGrade !== 'TODOS' ? selectedGrade.replace(/ero|do|er|to|vo|grado/g, '').trim() : null;
+    const filterSection = selectedSection !== 'TODOS' ? normalizeString(selectedSection) : null;
+
+    return records.filter(r => {
+      // IE Match - Optimized for performance
+      if (filterIE) {
+        const r_ie = normalizeString(r.id_ie || r.ie || r.institution || '');
+        if (r_ie !== filterIE && !r_ie.includes(filterIE)) return false;
+      }
+      
+      // Grade Match - Direct comparison if already normalized
+      if (filterGrade) {
+        const r_grado = String(r.grado || '').replace(/ero|do|er|to|vo|grado/g, '').trim();
+        if (r_grado !== filterGrade) return false;
+      }
+      
+      // Section Match
+      if (filterSection) {
+        const r_section = normalizeString(r.seccion || r.section || r.Seccion || '');
+        if (r_section !== filterSection) return false;
+      }
+      
+      return true;
+    });
   }, [records, selectedIE, selectedGrade, selectedSection]);
 
   // Sync selectedGrado (numeric) with selectedGrade (string like '1ero')
@@ -124,30 +137,80 @@ export default function Dashboard({ data = [] }) {
     }
   };
 
+  // Single pass calculation for all statistics
+  // Comparison Data for Growth Tracking
+  const comparisonData = useMemo(() => {
+    if (!records || records.length === 0) return [];
+    
+    const periods = Object.values(PERIODOS);
+    const currentIndex = periods.indexOf(selectedPeriod as any);
+    const prevPeriod = currentIndex > 0 ? periods[currentIndex - 1] : null;
+    
+    if (!prevPeriod) return [];
+    
+    const filterIE = selectedIE !== 'TODOS' ? normalizeString(selectedIE) : null;
+    const filterGrade = selectedGrade !== 'TODOS' ? selectedGrade.replace(/ero|do|er|to|vo|grado/g, '').trim() : null;
+    const filterSection = selectedSection !== 'TODOS' ? normalizeString(selectedSection) : null;
+
+    return records.filter(r => {
+      const r_period = normalizeString(r.tipo_evaluacion || r.periodo || '');
+      const target_period = normalizeString(prevPeriod);
+      if (r_period !== target_period) return false;
+
+      if (filterIE) {
+        const r_ie = normalizeString(r.id_ie || r.ie || r.institution || '');
+        if (r_ie !== filterIE && !r_ie.includes(filterIE)) return false;
+      }
+      
+      if (filterGrade) {
+        const r_grado = String(r.grado || '').replace(/ero|do|er|to|vo|grado/g, '').trim();
+        if (r_grado !== filterGrade) return false;
+      }
+      
+      if (filterSection) {
+        const r_section = normalizeString(r.seccion || r.section || r.Seccion || '');
+        if (r_section !== filterSection) return false;
+      }
+      
+      return true;
+    });
+  }, [records, selectedPeriod, selectedIE, selectedGrade, selectedSection]);
+
+  // Single pass calculation for all statistics with Growth Tracking
   const stats = useMemo(() => {
     if (filteredData.length === 0) return null;
     
-    const readingLevels = getAchievementLevels(filteredData, selectedGrado, 'reading', selectedPeriod, matrixOverrides);
-    const writingLevels = getAchievementLevels(filteredData, selectedGrado, 'writing', selectedPeriod, matrixOverrides);
-    const readingCaps = getCapacityAverages(filteredData, selectedGrado, 'reading', selectedPeriod, matrixOverrides);
-    const writingCaps = getCapacityAverages(filteredData, selectedGrado, 'writing', selectedPeriod, matrixOverrides);
-    const studentList = getStudentPerformanceList(filteredData, selectedGrado, matrixOverrides);
-    const riskStudents = getStudentsAtRisk(filteredData, matrixOverrides);
-    const gradeStatus = getGradeStatusSummary(filteredData, selectedGrado, selectedPeriod, matrixOverrides);
+    const current = processAllStats(filteredData, selectedGrado, matrixOverrides);
+    
+    let readingGrowth = 0;
+    let writingGrowth = 0;
+    let studentGrowth = 0;
 
+    if (comparisonData.length > 0) {
+      const prev = processAllStats(comparisonData, selectedGrado, matrixOverrides);
+      
+      const currentReadingSat = parseFloat(current.readingLevels.find(l => l.name === 'Satisfactorio')?.percentage || '0');
+      const prevReadingSat = parseFloat(prev.readingLevels.find(l => l.name === 'Satisfactorio')?.percentage || '0');
+      readingGrowth = currentReadingSat - prevReadingSat;
+
+      const currentWritingSat = parseFloat(current.writingLevels.find(l => l.name === 'Logrado')?.percentage || '0');
+      const prevWritingSat = parseFloat(prev.writingLevels.find(l => l.name === 'Logrado')?.percentage || '0');
+      writingGrowth = currentWritingSat - prevWritingSat;
+
+      studentGrowth = ((filteredData.length - comparisonData.length) / comparisonData.length) * 100;
+    }
+    
     return {
-      readingLevels,
-      writingLevels,
-      readingCaps,
-      writingCaps,
-      studentList,
-      riskStudents,
-      gradeStatus,
+      ...current,
       totalStudents: filteredData.length,
-      readingSatisfactory: readingLevels.find(l => l.name === 'Satisfactorio')?.percentage || 0,
-      writingSatisfactory: writingLevels.find(l => l.name === 'Satisfactorio')?.percentage || 0
+      readingSatisfactory: current.readingLevels.find(l => l.name === 'Satisfactorio')?.percentage || 0,
+      writingSatisfactory: current.writingLevels.find(l => l.name === 'Logrado')?.percentage || 0,
+      readingGrowth,
+      writingGrowth,
+      studentGrowth
     };
-  }, [filteredData, selectedGrado, selectedPeriod, matrixOverrides]);
+  }, [filteredData, comparisonData, selectedGrado, matrixOverrides]);
+
 
   if (stats === null) {
     return (
@@ -455,18 +518,21 @@ export default function Dashboard({ data = [] }) {
           icon={<Users />} 
           label="Estudiantes Evaluados" 
           value={stats.totalStudents} 
+          growth={stats.studentGrowth}
           color="brand-primary" 
         />
         <KPICard 
           icon={<BookOpen />} 
           label="% Satisfactorio Lectura" 
           value={`${stats.readingSatisfactory}%`} 
+          growth={stats.readingGrowth}
           color="brand-secondary" 
         />
         <KPICard 
           icon={<PenTool />} 
           label="% Satisfactorio Escritura" 
           value={`${stats.writingSatisfactory}%`} 
+          growth={stats.writingGrowth}
           color="brand-accent" 
         />
         <KPICard 
@@ -484,6 +550,7 @@ export default function Dashboard({ data = [] }) {
           color="red-500" 
         />
       </div>
+
 
       {/* Tabs */}
       <div className="flex border-b border-white/10 overflow-x-auto scrollbar-hide">
@@ -621,9 +688,7 @@ export default function Dashboard({ data = [] }) {
             onClose={() => setShowFullReport(false)}
             records={records}
             id_ie={filteredData[0]?.id_ie || filteredData[0]?.institution || filteredData[0]?.IE}
-            periodo={selectedPeriod}
-            matrixOverrides={matrixOverrides}
-            year={activeYear}
+            periodoFilter={selectedPeriod}
           />
         )}
       </AnimatePresence>
@@ -632,246 +697,7 @@ export default function Dashboard({ data = [] }) {
   );
 }
 
-function FullInstitutionalReport({ onClose, records, id_ie, periodo, matrixOverrides, year }) {
-  const reportData = useMemo(() => 
-    getIEReportData(records, id_ie, periodo, matrixOverrides),
-    [records, id_ie, periodo, matrixOverrides]
-  );
 
-  const handlePrint = () => {
-    window.print();
-  };
-
-  if (!reportData) return null;
-
-  return (
-    <div className="fixed inset-0 z-[60] bg-slate-950 overflow-auto flex flex-col print:bg-white print:p-0 print:static print:overflow-visible">
-      {/* Report Toolbar - Hidden on Print */}
-      <div className="sticky top-0 z-10 bg-slate-900/80 backdrop-blur-md border-b border-white/10 p-4 flex items-center justify-between print:hidden">
-        <div className="flex items-center gap-4">
-          <button onClick={onClose} className="p-2 text-white/40 hover:text-white transition-all">
-            <XCircle size={24} />
-          </button>
-          <h2 className="text-xl font-bold text-white">Previsualización de Informe Institucional</h2>
-        </div>
-        <button 
-          onClick={handlePrint}
-          className="px-6 py-2 bg-brand-primary text-white rounded-xl font-bold flex items-center gap-2 shadow-lg shadow-brand-primary/20 hover:scale-105 active:scale-95 transition-all"
-        >
-          <TrendingUp size={18} /> Imprimir / Guardar PDF
-        </button>
-      </div>
-
-      {/* Report Content */}
-      <div className="flex-1 p-8 md:p-16 max-w-5xl mx-auto w-full bg-white text-slate-900 shadow-2xl print:shadow-none print:p-0 print:max-w-none">
-        {/* Report Header */}
-        <div className="text-center space-y-4 mb-12 border-b-2 border-slate-900 pb-8">
-          <div className="flex justify-between items-start mb-6">
-            <div className="text-left">
-              <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Dirección Regional de Educación de Lima Provincias</p>
-              <p className="text-xs font-bold text-slate-600">UNIDAD DE GESTIÓN EDUCATIVA LOCAL N° 16 - BARRANCA</p>
-            </div>
-            <div className="text-right">
-              <p className="text-[10px] font-bold text-slate-400 uppercase">Estrategia Regional de Logros de Aprendizaje</p>
-              <p className="text-xs font-black text-brand-primary">LECTOEXPRES@ 3.0</p>
-            </div>
-          </div>
-          
-          <h1 className="text-4xl font-black uppercase tracking-tight text-slate-900">Informe Institucional de Resultados</h1>
-          <div className="flex justify-center gap-8 mt-4">
-            <div className="text-center">
-              <p className="text-[10px] font-bold text-slate-400 uppercase">Institución Educativa</p>
-              <p className="text-lg font-black">{reportData.ieName}</p>
-            </div>
-            <div className="text-center">
-              <p className="text-[10px] font-bold text-slate-400 uppercase">Periodo Evaluado</p>
-              <p className="text-lg font-black text-brand-primary uppercase">{reportData.periodo} {year}</p>
-            </div>
-            <div className="text-center">
-              <p className="text-[10px] font-bold text-slate-400 uppercase">Muestra Total</p>
-              <p className="text-lg font-black">{reportData.totalStudents} Estudiantes</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Grades and Sections Loop */}
-        <div className="space-y-12">
-          {reportData.grades.map((grade) => (
-            <div key={grade.grado} className="space-y-8 break-after-page">
-              <div className="bg-slate-900 text-white p-4 rounded-lg print:rounded-none">
-                <h2 className="text-2xl font-black uppercase">{grade.grado}° Grado de Primaria</h2>
-              </div>
-
-              {grade.sections.map((section) => (
-                <div key={section.section} className="space-y-8 pt-4 pb-12 border-b border-slate-100 last:border-0 break-inside-avoid">
-                  <div className="flex items-center gap-4">
-                    <span className="w-12 h-12 bg-brand-primary text-white rounded-full flex items-center justify-center font-black text-xl">
-                      {section.section}
-                    </span>
-                    <div>
-                      <h3 className="text-xl font-bold uppercase">Sección "{section.section}"</h3>
-                      <p className="text-xs text-slate-400 font-bold uppercase">{section.count} Estudiantes Evaluados</p>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
-                    {/* COMPETENCIA: LECTURA */}
-                    <div className="space-y-6">
-                      <div className="border-l-4 border-emerald-500 pl-4 py-1">
-                        <h4 className="text-sm font-black uppercase text-emerald-600">Competencia: Lectura</h4>
-                        <p className="text-[10px] text-slate-400 font-bold">Lee diversos tipos de textos escritos en su lengua materna</p>
-                      </div>
-
-                      {/* Small Summary Table for Lectura */}
-                      <table className="w-full text-xs border-collapse">
-                        <thead>
-                          <tr className="bg-slate-50">
-                            <th className="border border-slate-200 p-2 text-left">Nivel de Logro</th>
-                            <th className="border border-slate-200 p-2 text-center">Cant.</th>
-                            <th className="border border-slate-200 p-2 text-center">%</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {section.reading.map((level) => (
-                            <tr key={level.name}>
-                              <td className="border border-slate-200 p-2 font-bold">{level.name}</td>
-                              <td className="border border-slate-200 p-2 text-center">{level.value}</td>
-                              <td className="border border-slate-200 p-2 text-center font-bold">
-                                <span className={cn(
-                                  "px-2 py-0.5 rounded",
-                                  level.name === 'Satisfactorio' ? "bg-emerald-100 text-emerald-700" :
-                                  level.name === 'Proceso' ? "bg-yellow-100 text-yellow-700" : "bg-red-100 text-red-700"
-                                )}>
-                                  {level.percentage}%
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-
-                      {/* Capacity Breakdown Lectura */}
-                      <div className="space-y-2">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase">Rendimiento por Capacidad (Lectura)</p>
-                        {section.readingCaps.map(cap => (
-                          <div key={cap.name} className="flex items-center gap-3">
-                            <div className="flex-1">
-                              <div className="flex justify-between items-center mb-1">
-                                <span className="text-[9px] font-bold uppercase truncate max-w-[180px]">{cap.name}</span>
-                                <span className="text-[9px] font-black">{cap.percentage}%</span>
-                              </div>
-                              <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                                <div className="h-full bg-emerald-500" style={{ width: `${cap.percentage}%` }} />
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* COMPETENCIA: ESCRITURA */}
-                    <div className="space-y-6">
-                      <div className="border-l-4 border-brand-secondary pl-4 py-1">
-                        <h4 className="text-sm font-black uppercase text-brand-secondary">Competencia: Escritura</h4>
-                        <p className="text-[10px] text-slate-400 font-bold">Escribe diversos tipos de textos en su lengua materna</p>
-                      </div>
-
-                      {/* Small Summary Table for Escritura */}
-                      <table className="w-full text-xs border-collapse">
-                        <thead>
-                          <tr className="bg-slate-50">
-                            <th className="border border-slate-200 p-2 text-left">Nivel de Logro</th>
-                            <th className="border border-slate-200 p-2 text-center">Cant.</th>
-                            <th className="border border-slate-200 p-2 text-center">%</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {section.writing.map((level) => (
-                            <tr key={level.name}>
-                              <td className="border border-slate-200 p-2 font-bold">{level.name}</td>
-                              <td className="border border-slate-200 p-2 text-center">{level.value}</td>
-                              <td className="border border-slate-200 p-2 text-center font-bold">
-                                <span className={cn(
-                                  "px-2 py-0.5 rounded",
-                                  level.name === 'Satisfactorio' || level.name === 'Logrado' ? "bg-blue-100 text-blue-700" :
-                                  level.name === 'Proceso' ? "bg-yellow-100 text-yellow-700" : "bg-red-100 text-red-700"
-                                )}>
-                                  {level.percentage}%
-                                </span>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-
-                       {/* Capacity Breakdown Escritura */}
-                       <div className="space-y-2">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase">Rendimiento por Capacidad (Escritura)</p>
-                        {section.writingCaps.map(cap => (
-                          <div key={cap.name} className="flex items-center gap-3">
-                            <div className="flex-1">
-                              <div className="flex justify-between items-center mb-1">
-                                <span className="text-[9px] font-bold uppercase truncate max-w-[180px]">{cap.name}</span>
-                                <span className="text-[9px] font-black">{cap.percentage}%</span>
-                              </div>
-                              <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                                <div className="h-full bg-brand-secondary" style={{ width: `${cap.percentage}%` }} />
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-
-        {/* Footer for each page - simulated */}
-        <div className="mt-16 pt-8 border-t border-slate-200 flex justify-between items-end opacity-40">
-          <div className="text-[8px] font-bold">
-            PROYECTO UGEL 16 - PLATAFORMA DE MONITOREO LECTOEXPRES@ 3.0
-          </div>
-          <div className="text-[8px] font-bold">
-            FECHA DE EMISIÓN: {new Date().toLocaleDateString()}
-          </div>
-        </div>
-      </div>
-
-      <style jsx global>{`
-        @media print {
-          body * {
-            visibility: hidden;
-          }
-          .print\:static, .print\:static * {
-            visibility: visible;
-          }
-          .print\:static {
-            position: absolute;
-            left: 0;
-            top: 0;
-            width: 100%;
-          }
-          .break-after-page {
-            break-after: page;
-          }
-          .break-inside-avoid {
-            break-inside: avoid;
-          }
-          .grid {
-            display: block !important;
-          }
-          .grid > div {
-            margin-bottom: 2rem;
-            break-inside: avoid;
-          }
-        }
-      `}</style>
-    </div>
-  );
-}
 
 function AIAdvisor({ records, grado, period }) {
   const [loading, setLoading] = useState(false);
@@ -969,17 +795,31 @@ function AIAdvisor({ records, grado, period }) {
   );
 }
 
-function KPICard({ icon, label, value, subtitle, color }) {
+function KPICard({ icon, label, value, subtitle, color, growth }) {
+  const isPositive = growth > 0;
+  const isNegative = growth < 0;
+
   return (
     <div className="glass-panel p-5 relative overflow-hidden group">
       <div className={cn("absolute -right-4 -bottom-4 opacity-5 group-hover:scale-110 transition-transform duration-500", `text-${color}`)}>
         {icon && <div className="w-20 h-20">{icon}</div>}
       </div>
-      <div className="flex items-center gap-3 mb-3">
-        <div className={cn("w-9 h-9 rounded-xl flex items-center justify-center", `bg-${color}/20 text-${color}`)}>
-          {icon}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-3">
+          <div className={cn("w-9 h-9 rounded-xl flex items-center justify-center", `bg-${color}/20 text-${color}`)}>
+            {icon}
+          </div>
+          <span className="text-[10px] font-bold text-white/40 uppercase tracking-widest leading-tight">{label}</span>
         </div>
-        <span className="text-[10px] font-bold text-white/40 uppercase tracking-widest leading-tight">{label}</span>
+        {growth !== undefined && growth !== 0 && (
+          <div className={cn(
+            "flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-black",
+            isPositive ? "bg-emerald-500/10 text-emerald-400" : "bg-red-500/10 text-red-400"
+          )}>
+            {isPositive ? <TrendingUp size={10} /> : <AlertCircle size={10} />}
+            {isPositive ? '+' : ''}{growth.toFixed(1)}%
+          </div>
+        )}
       </div>
       <div className="flex items-end gap-2">
         <div className="text-3xl font-black text-white">{value}</div>
@@ -988,6 +828,7 @@ function KPICard({ icon, label, value, subtitle, color }) {
     </div>
   );
 }
+
 
 function TabButton({ children, active, onClick }) {
   return (

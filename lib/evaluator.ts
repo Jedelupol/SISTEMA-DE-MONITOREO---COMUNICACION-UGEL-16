@@ -1,13 +1,136 @@
 import { MATRICES } from './matrices_data';
 
+/**
+ * Normalizes a string: lowercase, no accents, trimmed, and single spaces.
+ */
+export function normalizeString(str: string): string {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // Remove accents
+    .replace(/i\.?\s?e\.?\s/gi, "") // Remove variations of "I.E. "
+    .replace(/[^a-z0-9\s]/g, "") // Remove non-alphanumeric except spaces
+    .replace(/\s+/g, " ") // Collapse multiple spaces to one
+    .trim();
+}
+
+/**
+ * Normalizes competency names for filtering and logic
+ * Supports variations like "Lectura", "Comprensin Lectora", "Escritura", "Produccin de Textos", etc.
+ */
+export function normalizeCompetency(name: string): 'reading' | 'writing' | null {
+  const n = normalizeString(name);
+  if (!n) return null;
+
+  const readingKeywords = ['lee', 'lectura', 'reading', 'comprension', 'literal', 'inferencial', 'critico'];
+  const writingKeywords = ['escribe', 'escritura', 'writing', 'produccion', 'textos'];
+
+  if (readingKeywords.some(key => n.includes(key))) {
+    return 'reading';
+  }
+  
+  if (writingKeywords.some(key => n.includes(key))) {
+    return 'writing';
+  }
+  
+  return null;
+}
+
+/**
+ * Normalizes a record's fields to ensure consistency.
+ * This is the "Limpieza de Entrada" layer.
+ */
+export function cleanRecordInput(record: any): any {
+  if (!record) return null;
+  
+  // Clone to avoid mutating original
+  const clean = { ...record };
+
+  // Helper to find value by flexible key match
+  const getVal = (possibleKeys: string[]) => {
+    const foundKey = Object.keys(record).find(k => {
+      const normalizedK = normalizeString(k).replace(/\s/g, '');
+      return possibleKeys.some(pk => normalizeString(pk).replace(/\s/g, '') === normalizedK);
+    });
+    return foundKey ? record[foundKey] : undefined;
+  };
+  
+  // 1. Competencia normalization
+  const rawComp = getVal(['competencia', 'competency', 'comp']);
+  if (rawComp) {
+    const comp = normalizeCompetency(String(rawComp));
+    if (comp) clean.competencia = comp;
+  }
+  
+  // 2. Grado normalization
+  const rawGrado = getVal(['grado', 'grade', 'year']);
+  if (rawGrado) {
+    const g = String(rawGrado).toLowerCase();
+    const match = g.match(/\d+/);
+    clean.grado = match ? match[0] : g.replace(/ero|do|er|to|vo|grado/g, '').trim();
+  }
+
+  // 3. ID_IE / Institution normalization
+  const rawIE = getVal(['id_ie', 'ie', 'institution', 'colegio', 'escuela']);
+  if (rawIE) {
+    const ieName = String(rawIE).trim().toUpperCase();
+    clean.institution = ieName;
+    clean.ie = ieName;
+    clean.id_ie = ieName;
+  }
+
+  // 4. Section normalization
+  const rawSection = getVal(['section', 'seccion', 'aula']);
+  if (rawSection) {
+    clean.section = String(rawSection).toUpperCase().trim();
+  }
+
+  // 5. Periodo normalization
+  const rawPeriod = getVal(['periodo', 'periodo_evaluacion', 'tipo_evaluacion', 'evaluacion']);
+  if (rawPeriod) {
+     clean.periodo = String(rawPeriod).toUpperCase().trim();
+     clean.tipo_evaluacion = clean.periodo;
+  }
+
+  // 6. UGEL normalization
+  const rawUGEL = getVal(['ugel', 'ugel_name']);
+  if (rawUGEL) {
+    clean.ugel = String(rawUGEL).trim().toUpperCase();
+  }
+
+  // 7. Student Name normalization
+  const rawName = getVal(['studentName', 'student', 'estudiante', 'alumno', 'nombres']);
+  if (rawName) {
+    clean.studentName = String(rawName).trim().toUpperCase();
+  }
+
+  // 8. DNI normalization
+  const rawDNI = getVal(['dni', 'DNI_Estudiante', 'documento']);
+  if (rawDNI) {
+    clean.dni = String(rawDNI).trim().replace(/\s+/g, '');
+  }
+
+  return clean;
+}
+
+
 export function evaluateResponse(gradoKey, responses, matrixOverrides = {}) {
   if (!responses) return null;
   
-  const periodo = responses.periodo || 'DIAGNÓSTICA';
+  // Apply Input Cleaning Layer
+  const cleanedResponse = cleanRecordInput(responses);
+  const activeGradoKey = cleanedResponse.grado || gradoKey;
+  
+  const periodo = cleanedResponse.periodo || 'DIAGNÓSTICA';
   
   // Start with default matrix
-  const matrixData = MATRICES[gradoKey];
-  if (!matrixData) return null;
+  const matrixData = MATRICES[activeGradoKey];
+  if (!matrixData) {
+     console.warn(`No matrix found for grade: ${activeGradoKey}`);
+     return null;
+  }
   
   let matrix = { ...matrixData };
 
@@ -15,7 +138,7 @@ export function evaluateResponse(gradoKey, responses, matrixOverrides = {}) {
   let writingCountLimit = undefined;
 
   // Use provided overrides
-  const override = matrixOverrides[`${gradoKey}_${periodo}`];
+  const override = matrixOverrides[`${activeGradoKey}_${periodo}`];
 
   if (override) {
     // Merge questions if they were overridden
@@ -27,8 +150,8 @@ export function evaluateResponse(gradoKey, responses, matrixOverrides = {}) {
   }
 
   const results = {
-    studentName: responses.studentName || responses.student || 'Estudiante',
-    dni: responses.dni || responses.DNI_Estudiante || '',
+    studentName: cleanedResponse.studentName || cleanedResponse.student || 'Estudiante',
+    dni: cleanedResponse.dni || cleanedResponse.DNI_Estudiante || '',
     reading: {
       count: 0,
       correct: 0,
@@ -52,8 +175,8 @@ export function evaluateResponse(gradoKey, responses, matrixOverrides = {}) {
     details: []
   };
 
-  const readingQuestions = matrix.questions.filter(q => q.competency.toLowerCase().includes('lee'));
-  const writingQuestions = matrix.questions.filter(q => q.competency.toLowerCase().includes('escribe'));
+  const readingQuestions = matrix.questions.filter(q => normalizeCompetency(q.competency) === 'reading');
+  const writingQuestions = matrix.questions.filter(q => normalizeCompetency(q.competency) === 'writing');
   
   const finalReading = readingCountLimit !== undefined 
     ? readingQuestions.slice(0, readingCountLimit) 
@@ -70,19 +193,25 @@ export function evaluateResponse(gradoKey, responses, matrixOverrides = {}) {
   const pointsPerCriterion = writingCount > 0 ? 20 / writingCount : 0;
 
   activeQuestions.forEach((q) => {
-    const userResponse = responses[q.id];
+    const userResponse = cleanedResponse[q.id];
+
     
     const competencyCategory = normalizeCompetency(q.competency);
     const isReading = competencyCategory === 'reading';
     const isWriting = competencyCategory === 'writing';
 
     let score = 0;
-    let isCorrect = false;
 
     if (isReading) {
       results.reading.count++;
       results.reading.maxScore += 1;
-      isCorrect = userResponse === q.key;
+      
+      // Robust comparison for reading keys
+      const cleanUserResponse = normalizeString(String(userResponse || ''));
+      const cleanKey = normalizeString(String(q.key || ''));
+      
+      const isCorrect = cleanUserResponse === cleanKey || userResponse === q.key;
+      
       if (isCorrect) {
         results.reading.correct++;
         results.reading.score += 1;
@@ -98,26 +227,23 @@ export function evaluateResponse(gradoKey, responses, matrixOverrides = {}) {
     } else if (isWriting) {
       results.writing.count++;
       
-      const resp = String(userResponse || '').toUpperCase().trim();
+      const resp = normalizeString(String(userResponse || ''));
       
       // Scoring: Only ADECUADA gets full points, PARCIALMENTE ADECUADA gets half
-      // INADECUADA and NO RESPONDIDA get 0 but still display their content
-      if (resp === 'ADECUADA' || resp === 'AD' || resp === 'ADECUADO') {
+      if (resp.includes('adecuada') && !resp.includes('parcial') && !resp.includes('inadecuada')) {
         score = pointsPerCriterion;
-      } else if (resp === 'PARCIALMENTE ADECUADA' || resp === 'PARCIAL' || resp === 'PA' || resp === 'PARCIALMENTE ADECUADO') {
+      } else if (resp.includes('parcial')) {
         score = pointsPerCriterion / 2;
       } else {
-        // INADECUADA, NO RESPONDIDA, etc. = 0 points
         score = 0;
       }
       
       results.writing.score += score;
 
-      // Store writing criterion detail with its text response
       results.writing.details.push({
         id: q.id,
         response: userResponse || '',
-        normalizedResponse: resp,
+        normalizedResponse: resp.toUpperCase(),
         score: score,
         capacity: q.capacity
       });
@@ -136,7 +262,7 @@ export function evaluateResponse(gradoKey, responses, matrixOverrides = {}) {
       key: q.key,
       score,
       capacity: q.capacity,
-      competency: q.competency,
+      competency: competencyCategory,
       isReading
     });
   });
@@ -217,7 +343,10 @@ export function getIERanking(records, periodoFilter = null) {
   const ranking = {};
 
   records.forEach(rec => {
-    if (periodoFilter && rec.periodo && rec.periodo !== periodoFilter) return;
+    const normalizedPeriod = normalizeString(periodoFilter);
+    const recPeriod = normalizeString(rec.tipo_evaluacion || rec.periodo || '');
+    if (periodoFilter && normalizedPeriod !== 'todos' && recPeriod !== normalizedPeriod) return;
+    
     const ie = rec.institution || 'Sin IE';
     if (!ranking[ie]) {
       ranking[ie] = { name: ie, total: 0, logrados: 0, sumVigesimal: 0, countVigesimal: 0 };
@@ -265,9 +394,9 @@ export function getAchievementLevels(allRecords, gradoKey = null, competencyType
 
   allRecords.forEach(rec => {
     // 1. Period Filter (if applicable)
-    const normalizedPeriod = String(periodoFilter || '').toUpperCase();
-    const recPeriod = String(rec.tipo_evaluacion || rec.periodo || '').toUpperCase();
-    if (periodoFilter && recPeriod !== normalizedPeriod) return;
+    const normalizedPeriod = normalizeString(periodoFilter);
+    const recPeriod = normalizeString(rec.tipo_evaluacion || rec.periodo || '');
+    if (periodoFilter && normalizedPeriod !== 'todos' && recPeriod !== normalizedPeriod) return;
 
     // 2. Determine Level
     let level = null;
@@ -355,9 +484,9 @@ export function getCapacityAverages(allRecords, gradoKey, competencyType = 'read
 
   allRecords.forEach(rec => {
     // 1. Period Filter
-    const normalizedPeriod = String(periodoFilter || '').toUpperCase();
-    const recPeriod = String(rec.periodo || rec.tipo_evaluacion || '').toUpperCase();
-    if (periodoFilter && recPeriod !== normalizedPeriod) return;
+    const normalizedPeriod = normalizeString(periodoFilter);
+    const recPeriod = normalizeString(rec.tipo_evaluacion || rec.periodo || '');
+    if (periodoFilter && normalizedPeriod !== 'todos' && recPeriod !== normalizedPeriod) return;
 
     // 2. Use specific grade if "ALL" is passed
     const activeGradoKey = (gradoKey === 'ALL' || !gradoKey) ? rec.grado : gradoKey;
@@ -426,9 +555,9 @@ export function getGradeStatusSummary(allRecords, gradoKey, periodoFilter = null
   };
 
   allRecords.forEach(rec => {
-    const normalizedPeriod = String(periodoFilter || '').toUpperCase();
-    const recPeriod = String(rec.periodo || rec.tipo_evaluacion || '').toUpperCase();
-    if (periodoFilter && recPeriod !== normalizedPeriod) return;
+    const normalizedPeriod = normalizeString(periodoFilter);
+    const recPeriod = normalizeString(rec.tipo_evaluacion || rec.periodo || '');
+    if (periodoFilter && normalizedPeriod !== 'todos' && recPeriod !== normalizedPeriod) return;
 
     const activeGrado = (gradoKey === 'TODOS' || !gradoKey) ? rec.grado : gradoKey;
     const evalResult = evaluateResponse(activeGrado, rec, matrixOverrides);
@@ -492,16 +621,17 @@ export function processRecordsIntoGroups(records) {
   const groupMap = {};
 
   records.forEach(r => {
-    const key = `${r.institution || 'Sin IE'}|${r.grado}|${r.section}|${r.periodo}|${r.periodo_anual || ''}|${r.tipo_evaluacion || ''}`;
+    const clean = cleanRecordInput(r);
+    const key = `${clean.institution || 'Sin IE'}|${clean.grado}|${clean.section}|${clean.periodo}|${clean.periodo_anual || ''}|${clean.tipo_evaluacion || ''}`;
     if (!groupMap[key]) {
       groupMap[key] = {
-        ie: r.institution || 'Sin IE',
-        id_ie: r.id_ie || '',
-        grado: r.grado,
-        section: r.section,
-        periodo: r.periodo,
-        periodo_anual: r.periodo_anual || '',
-        tipo_evaluacion: r.tipo_evaluacion || '',
+        ie: clean.institution || 'Sin IE',
+        id_ie: clean.id_ie || '',
+        grado: clean.grado,
+        section: clean.section,
+        periodo: clean.periodo,
+        periodo_anual: clean.periodo_anual || '',
+        tipo_evaluacion: clean.tipo_evaluacion || '',
         count: 0
       };
     }
@@ -606,13 +736,18 @@ export function getIEReportData(records, id_ie, periodoFilter = null, matrixOver
   const institutionRecords = records.filter(r => {
     const r_id_ie = String(r.id_ie || '');
     const r_institution = String(r.institution || r.IE || '');
-    const search_id = String(id_ie);
+    const search_id = normalizeString(String(id_ie));
     
-    const matchIE = r_id_ie === search_id || r_institution === search_id;
-    const matchPeriod = periodoFilter ? (
-      String(r.periodo || '').toUpperCase() === String(periodoFilter).toUpperCase() || 
-      String(r.tipo_evaluacion || '').toUpperCase() === String(periodoFilter).toUpperCase()
-    ) : true;
+    // Use normalized comparison for IE matching
+    const matchIE = normalizeString(r_id_ie) === search_id || 
+                  normalizeString(r_institution) === search_id ||
+                  normalizeString(r_id_ie).includes(search_id) ||
+                  normalizeString(r_institution).includes(search_id);
+
+    const normalizedPeriod = normalizeString(periodoFilter);
+    const recPeriod = normalizeString(r.tipo_evaluacion || r.periodo || '');
+    const matchPeriod = (periodoFilter && normalizedPeriod !== 'todos') ? (recPeriod === normalizedPeriod) : true;
+    
     return matchIE && matchPeriod;
   });
   
@@ -656,23 +791,14 @@ export function getIEReportData(records, id_ie, periodoFilter = null, matrixOver
     const sections = Object.keys(gradeData.sections).sort().map(sKey => {
       const sectionData = gradeData.sections[sKey];
       
-      // Determine field names by checking first record
-      const firstRec = sectionData.records[0];
-      // Normalización robusta para evitar reportes en blanco
-      const readingField = Object.keys(firstRec).find(k => normalizeCompetency(k) === 'reading') || 'readingLevel';
-      const writingField = Object.keys(firstRec).find(k => normalizeCompetency(k) === 'writing') || 'writingLevel';
-
       // Si no hay niveles precalculados, evaluamos en tiempo real para asegurar que el reporte no salga en blanco
       const processedRecords = sectionData.records.map(r => {
-        if (!r[readingField] || !r[writingField]) {
-          const evalRes = evaluateResponse(gKey, r, matrixOverrides);
-          return {
-            ...r,
-            readingLevel: r[readingField] || evalRes?.reading?.level || 'Inicio',
-            writingLevel: r[writingField] || evalRes?.writing?.level || 'Inicio'
-          };
-        }
-        return r;
+        const evalRes = evaluateResponse(gKey, r, matrixOverrides);
+        return {
+          ...r,
+          readingLevel: evalRes?.reading?.level || 'Inicio',
+          writingLevel: evalRes?.writing?.level || 'Inicio'
+        };
       });
 
       return {
@@ -693,33 +819,6 @@ export function getIEReportData(records, id_ie, periodoFilter = null, matrixOver
 
   return report;
 }
-
-/**
- * Normalizes competency names for filtering and logic
- * Supports variations like "Lectura", "Comprensión Lectora", "Escritura", "Producción de Textos", etc.
- */
-export function normalizeCompetency(name: string): 'reading' | 'writing' | null {
-  if (!name) return null;
-  // Normalización exhaustiva: minúsculas, sin acentos, sin espacios extra
-  const n = name.toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .trim();
-  
-  const readingKeywords = ['lee', 'lectura', 'reading', 'comprension', 'literal', 'inferencial', 'critico'];
-  const writingKeywords = ['escribe', 'escritura', 'writing', 'produccion', 'textos'];
-
-  if (readingKeywords.some(key => n.includes(key))) {
-    return 'reading';
-  }
-  
-  if (writingKeywords.some(key => n.includes(key))) {
-    return 'writing';
-  }
-  
-  return null;
-}
-
 
 /**
  * Aggregates results for a set of records, calculating levels for both competencies.
@@ -849,3 +948,123 @@ export function getDetailedCapacityStats(records, gradoKey, competencyType = 're
   })).sort((a, b) => parseFloat(b.percentage) - parseFloat(a.percentage));
 }
 
+
+/**
+ * Processes all statistics in a single pass over the records.
+ * Highly optimized for large datasets.
+ */
+export function processAllStats(records, gradoKey = 'TODOS', matrixOverrides = {}) {
+  if (!records || records.length === 0) return {
+    readingLevels: [],
+    writingLevels: [],
+    readingCaps: [],
+    writingCaps: [],
+    riskStudents: [],
+    kpis: { reading: { averageAcierto: "0.0" }, writing: { averageAcierto: "0.0" } },
+    total: 0
+  };
+
+  const total = records.length;
+  const readingCounts = { Satisfactorio: 0, Proceso: 0, Inicio: 0 };
+  const writingCounts = { Logrado: 0, Proceso: 0, Inicio: 0 };
+  const readingCapTotals = {};
+  const writingCapTotals = {};
+  const riskStudents = [];
+  const gradeStatus = { enElGrado: 0, previoAlGrado: 0, total: 0 };
+  
+  let r_totalCorrect = 0, r_totalMax = 0;
+  let w_totalCorrect = 0, w_totalMax = 0;
+
+  records.forEach(rec => {
+    const activeGradoKey = (gradoKey === 'TODOS' || !gradoKey) ? rec.grado : gradoKey;
+    const evalResult = evaluateResponse(activeGradoKey, rec, matrixOverrides);
+    
+    if (evalResult) {
+      // Reading Stats
+      const rLevel = evalResult.reading.level;
+      if (readingCounts.hasOwnProperty(rLevel)) readingCounts[rLevel]++;
+      r_totalCorrect += evalResult.reading.score;
+      r_totalMax += evalResult.reading.maxScore;
+      
+      Object.keys(evalResult.reading.capacities).forEach(cap => {
+        if (!readingCapTotals[cap]) readingCapTotals[cap] = { score: 0, maxScore: 0 };
+        readingCapTotals[cap].score += evalResult.reading.capacities[cap].score;
+        readingCapTotals[cap].maxScore += evalResult.reading.capacities[cap].maxScore;
+      });
+
+      // Writing Stats
+      const wLevel = evalResult.writing.level;
+      if (writingCounts.hasOwnProperty(wLevel)) writingCounts[wLevel]++;
+      w_totalCorrect += evalResult.writing.vigesimal;
+      w_totalMax += 20;
+
+      Object.keys(evalResult.writing.capacities).forEach(cap => {
+        if (!writingCapTotals[cap]) writingCapTotals[cap] = { score: 0, maxScore: 0 };
+        writingCapTotals[cap].score += evalResult.writing.capacities[cap].score;
+        writingCapTotals[cap].maxScore += evalResult.writing.capacities[cap].maxScore;
+      });
+
+      // Grade Status (Writing specific)
+      if (evalResult.writing.count > 0) {
+        gradeStatus.total++;
+        if (evalResult.writing.gradeStatus === 'EN EL GRADO') {
+          gradeStatus.enElGrado++;
+        } else {
+          gradeStatus.previoAlGrado++;
+        }
+      }
+
+      // Risk Assessment
+      const isReadingInicio = rLevel === 'Inicio';
+      const isWritingInicio = wLevel === 'Inicio';
+      if (isReadingInicio || isWritingInicio) {
+        riskStudents.push({
+          name: evalResult.studentName || 'Estudiante',
+          dni: rec.dni || rec.DNI_Estudiante || '',
+          grado: rec.grado,
+          section: rec.section || rec.Seccion || rec.seccion || '',
+          institution: rec.institution || rec.IE || 'Sin IE',
+          readingLevel: rLevel,
+          writingLevel: wLevel,
+          riskLevel: (isReadingInicio && isWritingInicio) ? 'Crítico' : 'Alto'
+        });
+      }
+    }
+  });
+
+  const COLORS = {
+    Satisfactorio: '#10b981', // green-500
+    Logrado: '#10b981',       // green-500
+    Proceso: '#f59e0b',       // amber-500
+    Inicio: '#ef4444',        // red-500
+    Default: '#6b7280'        // gray-500
+  };
+
+  return {
+    total,
+    readingLevels: [
+      { name: 'Satisfactorio', value: readingCounts.Satisfactorio, color: COLORS.Satisfactorio, percentage: (readingCounts.Satisfactorio/total*100).toFixed(1) },
+      { name: 'Proceso', value: readingCounts.Proceso, color: COLORS.Proceso, percentage: (readingCounts.Proceso/total*100).toFixed(1) },
+      { name: 'Inicio', value: readingCounts.Inicio, color: COLORS.Inicio, percentage: (readingCounts.Inicio/total*100).toFixed(1) }
+    ],
+    writingLevels: [
+      { name: 'Logrado', value: writingCounts.Logrado, color: COLORS.Logrado, percentage: (writingCounts.Logrado/total*100).toFixed(1) },
+      { name: 'Proceso', value: writingCounts.Proceso, color: COLORS.Proceso, percentage: (writingCounts.Proceso/total*100).toFixed(1) },
+      { name: 'Inicio', value: writingCounts.Inicio, color: COLORS.Inicio, percentage: (writingCounts.Inicio/total*100).toFixed(1) }
+    ],
+    readingCaps: Object.keys(readingCapTotals).map(name => ({
+      name,
+      percentage: readingCapTotals[name].maxScore > 0 ? (readingCapTotals[name].score / readingCapTotals[name].maxScore * 100).toFixed(1) : 0
+    })).sort((a, b) => b.percentage - a.percentage),
+    writingCaps: Object.keys(writingCapTotals).map(name => ({
+      name,
+      percentage: writingCapTotals[name].maxScore > 0 ? (writingCapTotals[name].score / writingCapTotals[name].maxScore * 100).toFixed(1) : 0
+    })).sort((a, b) => b.percentage - a.percentage),
+    riskStudents,
+    gradeStatus,
+    kpis: {
+      reading: { averageAcierto: r_totalMax > 0 ? ((r_totalCorrect / r_totalMax) * 100).toFixed(1) : "0.0" },
+      writing: { averageAcierto: w_totalMax > 0 ? ((w_totalCorrect / w_totalMax) * 100).toFixed(1) : "0.0" }
+    }
+  };
+}

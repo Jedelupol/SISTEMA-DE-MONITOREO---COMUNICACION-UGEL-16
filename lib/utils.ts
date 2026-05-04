@@ -3,7 +3,7 @@ import { twMerge } from "tailwind-merge"
 import JSZip from "jszip"
 import { jsPDF } from "jspdf"
 import html2canvas from "html2canvas"
-import { getIEReportData, getGlobalFilters, getAchievementLevels, aggregateResults } from "./evaluator"
+import { getIEReportData, getGlobalFilters, getAchievementLevels, aggregateResults, normalizeString } from "./evaluator"
 
 export function cn(...inputs) {
   return twMerge(clsx(inputs))
@@ -361,13 +361,20 @@ export const generateInstitutionalPDF = async (ieName: string, records: any[]) =
     return;
   }
 
+  const normIEName = normalizeString(ieName);
+
   for (let i = 0; i < grades.length; i++) {
     const grade = grades[i];
-    // Filtro flexible: reconoce ID modular o nombre de IE para evitar reportes vacíos
-    const gradeRecords = records.filter(r => 
-      (String(r.grado) === String(grade)) && 
-      (String(r.id_ie) === String(ieName) || String(r.institution || r.IE) === String(ieName))
-    );
+    const normGrade = String(grade).replace(/ero|do|er|to|vo|grado/g, '').trim();
+    
+    // Filtro flexible y normalizado para evitar reportes vacíos
+    const gradeRecords = records.filter(r => {
+      const r_grado = String(r.grado || '').replace(/ero|do|er|to|vo|grado/g, '').trim();
+      if (r_grado !== normGrade) return false;
+
+      const r_ie = normalizeString(r.id_ie || r.ie || r.institution || '');
+      return r_ie === normIEName || r_ie.includes(normIEName);
+    });
     
     if (gradeRecords.length === 0) continue; // Skip grades with no data for this specific IE
     

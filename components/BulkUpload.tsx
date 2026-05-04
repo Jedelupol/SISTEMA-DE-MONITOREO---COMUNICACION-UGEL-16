@@ -7,7 +7,9 @@ import * as XLSX from 'xlsx';
 import { MATRICES, PERIODOS } from '../lib/matrices_data';
 import { cn } from '../lib/utils';
 import { useData } from '../lib/DataContext';
-import { evaluateResponse } from '../lib/evaluator';
+import { evaluateResponse, normalizeCompetency, cleanRecordInput } from '../lib/evaluator';
+import { db } from '../lib/firebase';
+import { collection, writeBatch, doc, getDocs, query, where, Timestamp } from 'firebase/firestore';
 
 // Column mappings (0-indexed) - NO HEADERS in the files
 const LECTURA_COLS = {
@@ -72,6 +74,8 @@ export default function BulkUpload({ onComplete, session }: any) {
   const [sanityWarnings, setSanityWarnings] = useState<string[]>([]);
   const [uploadResult, setUploadResult] = useState<any>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStatusText, setUploadStatusText] = useState('');
   const [selectedPeriod, setSelectedPeriod] = useState(activePeriod || PERIODOS.DIAGNOSTICA);
   
   useEffect(() => {
@@ -258,29 +262,31 @@ export default function BulkUpload({ onComplete, session }: any) {
     // Process lectura first
     if (lecturaData) {
       lecturaData.forEach(rec => {
-        const key = `${rec.dni}|${rec.grado}|${rec.section}`;
-        recordMap.set(key, { ...rec });
+        const cleanRec = cleanRecordInput(rec);
+        const key = `${cleanRec.dni}|${cleanRec.grado}|${cleanRec.section}`;
+        recordMap.set(key, cleanRec);
       });
     }
 
     // Merge escritura on top
     if (escrituraData) {
       escrituraData.forEach(rec => {
-        const key = `${rec.dni}|${rec.grado}|${rec.section}`;
+        const cleanRec = cleanRecordInput(rec);
+        const key = `${cleanRec.dni}|${cleanRec.grado}|${cleanRec.section}`;
         if (recordMap.has(key)) {
           // Merge writing fields into existing reading record
           const existing = recordMap.get(key);
-          Object.keys(rec).forEach(k => {
+          Object.keys(cleanRec).forEach(k => {
             if (!k.startsWith('_') && k !== 'institution' && k !== 'dni' && k !== 'grado' && k !== 'section' && k !== 'studentName') {
-              existing[k] = rec[k];
+              existing[k] = cleanRec[k];
             }
           });
           // Keep institution from escritura if missing
-          if (!existing.institution && rec.institution) {
-            existing.institution = rec.institution;
+          if (!existing.institution && cleanRec.institution) {
+            existing.institution = cleanRec.institution;
           }
         } else {
-          recordMap.set(key, { ...rec });
+          recordMap.set(key, cleanRec);
         }
       });
     }
@@ -301,16 +307,16 @@ export default function BulkUpload({ onComplete, session }: any) {
     const merged = Array.from(recordMap.values())
       .filter(r => r.grado && MATRICES[r.grado]) // STRICT FILTER for valid grades
       .map(r => {
-        // 1. Evaluate achievement levels
+        // 1. Evaluate achievement levels (evaluateResponse already calls cleanRecordInput internally, 
+        // but it's safe to pass the already cleaned record)
         const evalResult = evaluateResponse(r.grado, r);
         
         // 2. Clean up internal fields and enrich with metadata
         const { _source, _rowIdx, ...clean } = r;
-        return {
+        
+        // Final normalization pass with global context
+        const finalRecord = cleanRecordInput({
           ...clean,
-          readingLevel: evalResult?.reading?.level || 'Inicio',
-          writingLevel: evalResult?.writing?.level || 'Inicio',
-          nivel_logro: evalResult?.reading?.level || evalResult?.writing?.level || 'Inicio',
           ugel: 'UGEL 16: Barranca',
           periodo: selectedPeriod,
           periodo_anual: globalYear,
@@ -319,6 +325,13 @@ export default function BulkUpload({ onComplete, session }: any) {
           teacherDni: session?.dni || 'ADMIN',
           teacherName: session?.user || 'Administrador',
           timestamp: new Date().toISOString()
+        });
+
+        return {
+          ...finalRecord,
+          readingLevel: evalResult?.reading?.level || 'Inicio',
+          writingLevel: evalResult?.writing?.level || 'Inicio',
+          nivel_logro: evalResult?.reading?.level || evalResult?.writing?.level || 'Inicio'
         };
       });
 
@@ -329,53 +342,66 @@ export default function BulkUpload({ onComplete, session }: any) {
 
   const [overwriteMode, setOverwriteMode] = useState(false);
 
-  const handleConfirmUpload = useCallback(() => {
-    setIsProcessing(true);
+  const handleConfirmUpload = useCallback(async () => {
+    if (mergedRecords.length === 0) return;
     
-    // Index existing by key for easy lookup/overwrite
-    const existingMap = new Map();
-    records.forEach(r => {
-      const key = `${r.dni || ''}|${r.grado || ''}|${r.periodo || ''}`;
-      existingMap.set(key, r);
-    });
+    setIsUploading(true);
+    setUploadProgress(0);
+    setUploadStatusText('Iniciando subida...');
+    
+    try {
+      const recordsCol = collection(db, "registros_ugel16");
+      const total = mergedRecords.length;
+      const chunkSize = 500;
+      let processed = 0;
+      let added = 0;
+      let updated = 0;
 
-    let added = 0;
-    let updatedCount = 0;
-    let skipped = 0;
+      // 1. If overwrite mode is ON, we might need to pre-fetch or handle it per batch
+      // For simplicity and performance, we'll process in chunks
+      for (let i = 0; i < total; i += chunkSize) {
+        const chunk = mergedRecords.slice(i, i + chunkSize);
+        const batch = writeBatch(db);
+        
+        setUploadStatusText(`Procesando lote ${Math.floor(i / chunkSize) + 1}...`);
 
-    mergedRecords.forEach(record => {
-      // Key for duplicate detection in this period/year
-      const key = `${record.dni}|${record.grado}|${record.periodo}|${record.periodo_anual}|${record.tipo_evaluacion}|${record.id_ie}`;
-      if (existingMap.has(key)) {
-        if (overwriteMode) {
-          // Merge/Overwrite: update the existing one with new data
-          const current = existingMap.get(key);
-          existingMap.set(key, { ...current, ...record });
-          updatedCount++;
-        } else {
-          skipped++;
+        for (const record of chunk) {
+          // Determine if it exists? If we have a deterministic ID, it's easier.
+          // For now, let's use a composite ID: DNI_PERIOD_YEAR_IE
+          const customId = `${record.dni}_${record.periodo}_${record.periodo_anual}_${record.id_ie}`.replace(/\s+/g, '_');
+          const docRef = doc(recordsCol, customId);
+          
+          batch.set(docRef, {
+            ...record,
+            serverTimestamp: Timestamp.now()
+          }, { merge: overwriteMode });
+          
+          if (overwriteMode) updated++; else added++;
         }
-      } else {
-        existingMap.set(key, record);
-        added++;
+
+        await batch.commit();
+        processed += chunk.length;
+        setUploadProgress(Math.round((processed / total) * 100));
       }
-    });
-    
-    const finalRecords = Array.from(existingMap.values());
-    updateRecords(finalRecords);
 
-    setUploadResult({
-      total: mergedRecords.length,
-      added,
-      updated: updatedCount,
-      skipped,
-      existingBefore: records.length,
-      totalAfter: finalRecords.length
-    });
+      setUploadResult({
+        total,
+        added: overwriteMode ? 0 : added,
+        updated: overwriteMode ? updated : 0,
+        skipped: 0,
+        totalAfter: allRecords.length + (overwriteMode ? 0 : added)
+      });
+      
+      setPreviewOpen(false);
+    } catch (error) {
+      console.error("Error en la carga masiva:", error);
+      alert("Error al subir los datos. Revise la consola.");
+    } finally {
+      setIsUploading(false);
+      setUploadStatusText('');
+    }
+  }, [mergedRecords, overwriteMode, allRecords, db]);
 
-    setPreviewOpen(false);
-    setIsProcessing(false);
-  }, [mergedRecords, overwriteMode, records, updateRecords]);
 
   const handleReset = () => {
     setLecturaData(null);
@@ -680,21 +706,46 @@ export default function BulkUpload({ onComplete, session }: any) {
             )}
           </div>
 
+          {isUploading && (
+            <div className="space-y-2 p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20">
+              <div className="flex justify-between text-[10px] font-bold text-emerald-400/60 uppercase tracking-widest">
+                <span>{uploadStatusText}</span>
+                <span>{uploadProgress}%</span>
+              </div>
+              <div className="h-2 bg-white/5 rounded-full overflow-hidden border border-white/10">
+                <motion.div 
+                  initial={{ width: 0 }}
+                  animate={{ width: `${uploadProgress}%` }}
+                  className="h-full bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]"
+                />
+              </div>
+            </div>
+          )}
+
           <div className="flex gap-4">
             <button
               onClick={() => setPreviewOpen(false)}
-              className="flex-1 py-4 bg-white/5 border border-white/10 rounded-2xl font-bold text-white transition-all hover:bg-white/10"
+              disabled={isUploading}
+              className="flex-1 py-4 bg-white/5 border border-white/10 rounded-2xl font-bold text-white transition-all hover:bg-white/10 disabled:opacity-30"
             >
               Cancelar
             </button>
             <button
               onClick={handleConfirmUpload}
-              disabled={isProcessing}
+              disabled={isUploading}
               className="flex-[2] py-4 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:opacity-90 disabled:opacity-50 rounded-2xl font-bold text-white shadow-lg transition-all flex items-center justify-center gap-2"
             >
-              <Download size={20} /> Confirmar Carga ({mergedRecords.length} registros)
+              {isUploading ? (
+                <motion.div animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: "linear" }}>
+                  <Database size={20} />
+                </motion.div>
+              ) : (
+                <Download size={20} />
+              )}
+              {isUploading ? 'Subiendo...' : `Confirmar Carga (${mergedRecords.length} registros)`}
             </button>
           </div>
+
         </motion.div>
       )}
 

@@ -81,18 +81,24 @@ export function DataProvider({ children }) {
       let q;
       
       if (session?.role === 'admin' && !id_ie) {
-         q = query(recordsCol, orderBy("timestamp", "desc"));
+         q = query(recordsCol);
       } else {
          q = query(recordsCol, where("id_ie", "==", String(id_ie)));
       }
 
-      const querySnapshot = await getDocs(q);
       const fetchedRecords = querySnapshot.docs.map(doc => {
         const data = doc.data();
         return cleanRecordInput({
           firebaseId: doc.id,
           ...data
         });
+      });
+
+      // Client-side sorting: newest first (descending)
+      fetchedRecords.sort((a, b) => {
+        const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return timeB - timeA;
       });
 
       setRecords(fetchedRecords);
@@ -117,7 +123,7 @@ export function DataProvider({ children }) {
     let q;
     
     if (session.role === 'admin') {
-      q = query(recordsCol, orderBy("timestamp", "desc"));
+      q = query(recordsCol);
     } else if (session.id_ie) {
       q = query(recordsCol, where("id_ie", "==", String(session.id_ie)));
     } else {
@@ -133,6 +139,13 @@ export function DataProvider({ children }) {
           firebaseId: doc.id,
           ...data
         });
+      });
+
+      // Client-side sorting: newest first (descending)
+      fetchedRecords.sort((a, b) => {
+        const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+        const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+        return timeB - timeA;
       });
 
       setRecords(fetchedRecords);

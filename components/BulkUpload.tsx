@@ -70,7 +70,7 @@ export default function BulkUpload({ onComplete, session }: any) {
   const [selectedGrado, setSelectedGrado] = useState('1');
   const [globalYear, setGlobalYear] = useState(activeYear || '2026');
   const [globalEvaluationType, setGlobalEvaluationType] = useState('DIAGNÓSTICA');
-  const [globalInstitutionId, setGlobalInstitutionId] = useState('');
+  const [globalInstitutionId, setGlobalInstitutionId] = useState(session?.id_ie || '');
   const [sanityWarnings, setSanityWarnings] = useState<string[]>([]);
   const [uploadResult, setUploadResult] = useState<any>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -81,7 +81,10 @@ export default function BulkUpload({ onComplete, session }: any) {
   useEffect(() => {
     const savedPeriod = localStorage.getItem('active_period') || PERIODOS.DIAGNOSTICA;
     setSelectedPeriod(savedPeriod);
-  }, []);
+    if (session?.id_ie && !globalInstitutionId) {
+      setGlobalInstitutionId(session.id_ie);
+    }
+  }, [session, globalInstitutionId]);
   
   const lecturaRef = useRef<HTMLInputElement>(null);
   const escrituraRef = useRef<HTMLInputElement>(null);
@@ -321,7 +324,7 @@ export default function BulkUpload({ onComplete, session }: any) {
           periodo: selectedPeriod,
           periodo_anual: globalYear,
           tipo_evaluacion: globalEvaluationType,
-          id_ie: globalInstitutionId || r.id_ie || '',
+          id_ie: globalInstitutionId || session?.id_ie || r.id_ie || r.institution || '',
           teacherDni: session?.dni || 'ADMIN',
           teacherName: session?.user || 'Administrador',
           timestamp: new Date().toISOString()
@@ -338,7 +341,8 @@ export default function BulkUpload({ onComplete, session }: any) {
     setMergedRecords(merged);
     setPreviewOpen(true);
     setIsProcessing(false);
-  }, [lecturaData, escrituraData, selectedPeriod, session]);
+    console.log("Merging data with:", { selectedPeriod, globalYear, globalEvaluationType, globalInstitutionId });
+  }, [lecturaData, escrituraData, selectedPeriod, session, globalYear, globalEvaluationType, globalInstitutionId]);
 
   const [overwriteMode, setOverwriteMode] = useState(false);
 
@@ -349,6 +353,7 @@ export default function BulkUpload({ onComplete, session }: any) {
     setUploadProgress(0);
     setUploadStatusText('Iniciando subida...');
     
+    console.log("Starting upload of", mergedRecords.length, "records");
     try {
       const recordsCol = collection(db, "registros_ugel16");
       const total = mergedRecords.length;
@@ -371,6 +376,7 @@ export default function BulkUpload({ onComplete, session }: any) {
           const customId = `${record.dni}_${record.periodo}_${record.periodo_anual}_${record.id_ie}`.replace(/\s+/g, '_');
           const docRef = doc(recordsCol, customId);
           
+          console.log(`Setting document: ${customId}`);
           batch.set(docRef, {
             ...record,
             serverTimestamp: Timestamp.now()
@@ -380,6 +386,7 @@ export default function BulkUpload({ onComplete, session }: any) {
         }
 
         await batch.commit();
+        console.log("Batch commit successful");
         processed += chunk.length;
         setUploadProgress(Math.round((processed / total) * 100));
       }
